@@ -1,1 +1,1 @@
-# ECG_Signal_Detection
+# Heart_Signal_Detection
