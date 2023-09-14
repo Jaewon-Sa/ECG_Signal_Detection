@@ -33,7 +33,7 @@ def get_iou(a,b):
     if w > 0 and h > 0:
         iter_area = w*h
     
-    return iter_area / (union_area+iter_area)
+    return iter_area / (union_area-iter_area)
 
 def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold = 0.2):
     '''
@@ -97,7 +97,7 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
             cls, loc = model(images)
             #상위 200개에 대한 detection
             #size=(batch, numclass ,200, 5)
-            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=30, conf_thresh=0.4, nms_thresh=0.5)
+            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, conf_thresh=0.4, nms_thresh=0.5)
      
         all_boxes = [[[] for _ in range(output.size(0))]
                  for _ in range(output.size(1))]  #all_boxes[cls][image]
@@ -118,7 +118,7 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                                                                      copy=False)
                 all_boxes[j][i] = cls_dets
 
-        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = 0.2)
+        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = 0.5)
         
         total_TP_1 = 0
         total_TP_2 = 0 #검수용
@@ -157,7 +157,10 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                     
             TPFP_cls_filter[cls_idx] = TPFP_cls_list
         
-        
+        #print(TPFP)
+        #print(TPFN)
+        #print(total_TP_1,total_TP_2)
+        #print(total_FP,total_FN)
         Precison = total_TP_1 / (total_TP_1 + total_FP) 
         Recall = total_TP_1 / (total_TP_1 + total_FN) #total_labels
      

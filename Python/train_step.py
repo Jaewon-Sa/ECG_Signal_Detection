@@ -66,7 +66,7 @@ def train_step(model, Data_loader, epoch_num, batchsize, lr=0.005, is_wandb=Fals
                 loss = loss_l + loss_c
                 loss.backward()
                 
-                nn.utils.clip_grad_value_(model.parameters(), clip_value=2.0)
+                #nn.utils.clip_grad_value_(model.parameters(), clip_value=2.0)
                         
                 
                 optimizer.step() # 파라미터 갱신
