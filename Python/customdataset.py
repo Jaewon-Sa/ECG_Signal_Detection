@@ -15,8 +15,8 @@ import torchaudio.transforms as ta_transforms
 import math
 import torchaudio
 import cv2
+import cmapy
 
-PATH = '/content/drive/MyDrive/aiffel/AIFFELTHON/the-circor-digiscope-phonocardiogram-dataset-1.0.3/training_data'
 SAMPLE_RATE = 4000
 HOP_LENGTH = 40
 N_MELS = 128
@@ -159,6 +159,7 @@ class Biquad:
 class CustomDataset(Dataset):
     def __init__(self, path, txt_list,
                  filter_params=False,
+                 multi_channels=False,
                  clipping=False,
                  target_size=(300, 300),
                  th=5,
@@ -167,6 +168,7 @@ class CustomDataset(Dataset):
         self.txt_list = txt_list
 
         self.filter_params = filter_params
+        self.multi_channels = multi_channels
         self.clipping = clipping
         self.target_size = target_size
         self.th = int(th * SAMPLE_RATE / HOP_LENGTH)
@@ -202,20 +204,19 @@ class CustomDataset(Dataset):
         self.wavs.sort()
         self.tsvs.sort()
 
+    # torchaudio로 필터링 적용
     def apply_filter(self, audio):
-        # 필터 파라미터가 1개일 경우
-        if len(self.filter_params) == 4:
-            audio = self.filter_torchaudio(audio, self.filter_params)
         # 필터 파라미터가 2개일 경우 필터 2회 적용
-        elif len(self.filter_params) == 2:
+        if len(self.filter_params) == 2:
             for filter_param in self.filter_params:
                 audio = self.filter_torchaudio(audio, filter_param)
-        # 필터 파라미터가 3개 이상일 경우 에러
+        # 필터 파라미터가 1개일 경우 필터 1회 적용
+        elif len(self.filter_params) in [4, 5]:
+            audio = self.filter_torchaudio(audio, self.filter_params)
         else:
-            raise ValueError("Input tuple must have a length of 2 or less elements.")
+            raise ValueError("2개 이하의 필터를 적용해주세요.")
         return audio
 
-    # torchaudio로 필터링 적용
     def filter_torchaudio(self, _audio, _params):
         biquad_filter = Biquad(*_params)
         a1, a2, b0, b1, b2 = biquad_filter.constants()
@@ -231,15 +232,24 @@ class CustomDataset(Dataset):
         return _filtered_audio
 
     def blank_clipping(self, img):
-        img[img < 10 / 255] = 0
-        img = np.array(img[0])
+        img[img < 10/255] = 0
+        img = np.transpose(np.array(img), (1, 2, 0))  # 텐서 > 넘파이
+        # 3채널 이미지의 경우
+        if self.multi_channels is True:
+            copy = img.copy()   # 사본 생성
+            img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)   # 흑백으로
+        # 1채널 이미지의 경우
+        else:
+            copy = img
+        # 행별로 black_percent 계산
         for row in range(img.shape[0] - 1, 0, -1):
-            black_percent = len(np.where(img[row, :] == 0)[0]) / len(img[row, :])
+            black_percent = len(np.where(img[row,:]==0)[0])/len(img[row,:])
             if black_percent < 0.80:
                 break
+        # clipping
         if (row - 1) > 0:
-            img = img[:(row - 1), :]
-        return img
+            copy = copy[:(row - 1), :, :]
+        return transforms.ToTensor()(copy)
 
     def padding(self, spec, target_length, padding_value=0):
         pad_width = target_length - spec.shape[-1]
@@ -251,7 +261,7 @@ class CustomDataset(Dataset):
         return resized_spec
 
     def normalize_spectrogram(self, spec):
-        normalized = (spec - spec.min()) / (spec.max() - spec.min())
+        normalized = (spec-spec.min()) / (spec.max() - spec.min())
         return normalized
 
     def get_mel_spectrogram(self):
@@ -260,7 +270,7 @@ class CustomDataset(Dataset):
         self.iter_list = []
 
         for path_wav in self.wavs:
-            path = os.path.join(PATH, path_wav)
+            path = os.path.join(self.path, path_wav)
             # Torchaudio 이용하여 파일 로드
             x = torchaudio.load(path)[0]
             # Filtering
@@ -269,29 +279,34 @@ class CustomDataset(Dataset):
 
             # 멜스펙트로그램 변환
             ms = ta_transforms.MelSpectrogram(sample_rate=SAMPLE_RATE,
-                                              n_fft=N_FFT,
-                                              win_length=WIN_LENGTH,
-                                              n_mels=N_MELS,
-                                              hop_length=HOP_LENGTH)(x)
+                                            n_fft=N_FFT,
+                                            win_length=WIN_LENGTH,
+                                            n_mels=N_MELS,
+                                            hop_length=HOP_LENGTH)(x)
             ms = torchaudio.functional.amplitude_to_DB(ms, multiplier=10.,
-                                                       amin=1e-10,
-                                                       db_multiplier=1.0,
-                                                       top_db=80.0)
-
+                                                    amin=1e-10,
+                                                    db_multiplier=1.0,
+                                                    top_db=80.0)
             # 0~1로 정규화
             ms = self.normalize_spectrogram(ms)
+
+            # 3채널 기능
+            if self.multi_channels is True:
+                ms *= 255
+                ms = np.array(ms[0])
+                ms = ms.astype(np.uint8)
+                ms = cv2.applyColorMap(ms.astype(np.uint8), cmapy.cmap('magma'))
+                ms = transforms.ToTensor()(ms)
 
             # Blank region clipping
             if self.clipping is True:
                 ms = self.blank_clipping(ms)
-                ms = torch.from_numpy(ms)
-                ms = ms.unsqueeze(0)
 
             # 원본 wav의 길이가 th보다 길다면 Slicing
             if ms.shape[-1] > self.th + 1:
                 scale = 1
-                num_splits = ms.shape[-1] // self.th  # wav길이 == th의 배수
-                if ms.shape[-1] % self.th != 0:  # wav길이 != th의 배수
+                num_splits = ms.shape[-1] // self.th    # wav길이 == th의 배수
+                if ms.shape[-1] % self.th != 0: # wav길이 != th의 배수
                     num_splits += 1
                 self.iter_list.append(num_splits)
 
@@ -341,7 +356,7 @@ class CustomDataset(Dataset):
         labels = []
         idx = 0
         for i, path_tsv in enumerate(self.tsvs):
-            path = os.path.join(PATH, path_tsv)
+            path = os.path.join(self.path, path_tsv)
             tsv_data = pd.read_csv(path, sep='\t', header=None)
             iter = self.iter_list[i]
             for _iter in range(iter):
@@ -354,10 +369,10 @@ class CustomDataset(Dataset):
                         # 구간 불러와서 sr값 곱하고 hop_legth로 나누기
                         tsv_row[0] = tsv_row[0] * SAMPLE_RATE / HOP_LENGTH - (_iter * self.th)
                         tsv_row[1] = tsv_row[1] * SAMPLE_RATE / HOP_LENGTH - (_iter * self.th)
-                        tsv_row[2] = 1 if tsv_row[2] == 1 else 2  # S1=1, S2=2
+                        tsv_row[2] = 1 if tsv_row[2] == 1 else 2    # S1=1, S2=2
                         # 시작점 혹은 끝점이 구간 안에 존재한다면
                         if (0 <= tsv_row[0] < self.th or \
-                                self.th >= tsv_row[1] > 0):
+                            self.th >= tsv_row[1] > 0):
                             # 시작점이 0보다 작은 경우 0으로
                             if tsv_row[0] < 0:
                                 tsv_row[0] = 0
@@ -373,23 +388,21 @@ class CustomDataset(Dataset):
                             tsv_row[1] *= (self.target_size[1] - 1) / self.th
                             # label.append((int(tsv_row[2]), tsv_row[0], tsv_row[1]))
                             label.append([tsv_row[0] / self.target_size[1], 0 / self.target_size[0],
-                                          tsv_row[1] / self.target_size[1], self.target_size[0] / self.target_size[0],
-                                          int(tsv_row[2])])  # xmin, ymin, xmax, ymax, cls
+                                tsv_row[1] / self.target_size[1], self.target_size[0] / self.target_size[0],
+                                int(tsv_row[2])])# xmin, ymin, xmax, ymax, cls
                         # 시작점 혹은 끝점이 구간 안에 존재하지 않는다면
-                        else:
-                            continue
+                        else: continue
                     # S1, S2에 속하면서 시작점 혹은 끝점이 구간 안에 존재하는 경우를 제외한 나머지 경우
-                    else:
-                        continue
-                if (len(label) == 0):
+                    else: continue
+                if(len(label)==0):
                     self.delete_list.append(idx)
                 idx += 1
                 labels.append(label)
         return labels
 
     def delete_data(self):
-        delete_count = 0
+        delete_count=0
         for i in self.delete_list:
-            del self.y[i - delete_count]
-            delete_count += 1
+            del self.y[i-delete_count]
+            delete_count+=1
         self.x = self.x[[i for i in range(self.x.size(0)) if i not in self.delete_list]]
