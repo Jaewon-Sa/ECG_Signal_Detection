@@ -97,7 +97,7 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
             cls, loc = model(images)
             #상위 200개에 대한 detection
             #size=(batch, numclass ,200, 5)
-            output = detect.forward(loc, cls, tensor_d,                                     num_classes = cls.size(-1),  bkg_label=0, top_k=30, conf_thresh=0.4, nms_thresh=0.5)
+            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=30, conf_thresh=0.4, nms_thresh=0.5)
      
         all_boxes = [[[] for _ in range(output.size(0))]
                  for _ in range(output.size(1))]  #all_boxes[cls][image]
