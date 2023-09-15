@@ -6,6 +6,7 @@
 
 import torch
 from utils import *
+
 class Detect:
     """At test time, Detect is the final layer of SSD.  Decode location preds,
     apply non-maximum suppression to location predictions based on conf
@@ -44,6 +45,7 @@ class Detect:
             decoded_boxes = decode(loc_data[i], prior_data, self.variance)#xmin,xmax,ymin,ymax 변환
             # For each class, perform nms
             conf_scores = conf_preds[i].clone() # (num_class, dbox)
+
             for cl in range(1, self.num_classes):#클래스별 confidence계산
                 c_mask = conf_scores[cl].gt(self.conf_thresh) #해당값 이하면 false 이상이면 True , size= (dbox)
                 scores = conf_scores[cl][c_mask] #인식된 default box의 점수만 남음
@@ -54,7 +56,7 @@ class Detect:
                 boxes = decoded_boxes[l_mask].view(-1, 4)
                 # idx of highest scoring and non-overlapping boxes per class
                 ids, count = nms(boxes, scores, self.nms_thresh, self.top_k)
-                output[i, cl, :count] =                     torch.cat((scores[ids[:count]].unsqueeze(1),
+                output[i, cl, :count] = torch.cat((scores[ids[:count]].unsqueeze(1),
                                boxes[ids[:count]]), 1)
         flt = output.contiguous().view(num, -1, 5)
         _, idx = flt[:, :, 0].sort(1, descending=True)

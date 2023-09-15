@@ -161,15 +161,15 @@ class SSD(nn.Module):
 # In[1]:
 
 
-def build_model(inference_type, input_channels=1):
+def build_model(inference_type, input_channels=1, is_freeze=True):
 
     backbone = models.mobilenet_v3_large(pretrained=True)
-
-    for name, layers in backbone.named_parameters():
-        if name.split(".")[1]!="0":
-            layers.requires_grad = False
-        else:
-            pass
+    if is_freeze:
+        for name, layers in backbone.named_parameters():
+            if name.split(".")[1]!="0":
+                layers.requires_grad = False
+            else:
+                pass
 
     #for name, layers in backbone.named_children():
     #    for param in layers.parameters():

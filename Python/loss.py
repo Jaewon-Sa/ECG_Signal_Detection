@@ -104,7 +104,7 @@ class MultiBoxLoss(nn.Module):
         # 물체를 발견한 Positive DBox의 손실을 0으로 한다.
         # (주의) 물체는 label이 1 이상, 라벨 0은 배경을 의미
         num_pos = pos_mask.long().sum(1, keepdim=True)  # 미니 배치별 물체 클래스 예측 수
-        loss_c = loss_c.view(num_batch, -1)  # torch.Size([num_batch, 8732])
+        loss_c = loss_c.view(num_batch, -1)  # torch.Size([num_batch, dbox])
         loss_c[pos_mask] = 0  # 물체를 발견한 DBox는 손실 0으로 한다.
 
         # Hard Negative Mining
@@ -127,7 +127,7 @@ class MultiBoxLoss(nn.Module):
         # ? = idx_rank[0]은 loss_c의 요소 0번째가 내림차순으로 몇 번째인지 나타냄
 
         # 배경 DBox의 수 num_neg를 구한다. HardNegative Mining으로 
-        # 물체 발견 DBox으 ㅣ수 num_pos의 세 배 (self.negpos_ratio 배)로 한다.
+        # 물체 발견 DBox의 수 num_pos의 세 배 (self.negpos_ratio 배)로 한다.
         # DBox의 수를 초과한 경우에는 DBox의 수를 상한으로 한다.
         num_neg = torch.clamp(num_pos*self.negpos_ratio, max=num_dbox)
 
