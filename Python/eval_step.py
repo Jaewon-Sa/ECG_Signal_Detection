@@ -13,6 +13,8 @@ from torch import optim
 from defaultbox import default
 from Detect import Detect
 
+from matplotlib import pyplot as plt
+
 def get_iou(a,b):
     if len(a)!=4 or len(b)!=4:
         return 0
@@ -46,8 +48,9 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
     (batch,객체개수,5) xmin, ymin, xmax, ymax, cls
     정규화 되어있음
     '''
-    TPFN=[[[-1, "FN", -1] for _ in t_bboxes] for t_bboxes in target_bboxes]  #tp, fn 저장용 실측 기준
-    TPFP=[[[[b_cls_bbox[-1], "FP"] for b_cls_bbox in b_cls_bboxes] for b_cls_bboxes in cls_bboxes] for cls_bboxes in det_bboxes]  #tp, fp 저장용 예측 기준
+    # confidence type iou index
+    TPFN=[[[-1, "FN", -1, -1] for _ in t_bboxes] for t_bboxes in target_bboxes]  #tp, fn 저장용 실측 기준
+    TPFP=[[[[b_cls_bbox[-1], "FP", -1] for b_cls_bbox in b_cls_bboxes] for b_cls_bboxes in cls_bboxes] for cls_bboxes in det_bboxes]  #tp, fp 저장용 예측 기준
 
     for i in range(batch):
         for cl in range(1,n_class):
@@ -56,21 +59,80 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
             for t_i, t_bbox in enumerate(t_bboxes):
                 if t_bbox[-1]==cl:
                     for d_i, d_bbox in enumerate(d_bboxes):
+                        '''
+                        1. 한 gt에 여러개 dbox 존재하는경우
+                        -> 가장 높은 iou dbox 채택
+                        2. 한 dbox에 높은 iou 를 가진 gt가 2개 존재하는경우
+                        -> dbox 가 이미 tp이면 넘어감
+                        '''
                         iou = get_iou(d_bbox[:-1],t_bbox[:-1])
+                        
+                        if TPFP[cl][i][d_i][1] == 'TP' and TPFP[cl][i][d_i][-1] != t_i: # 탐색과정에서 dbox가 다른 gt에 tp 일 경우
+                            continue
+ 
                         if iou >= iou_threshold:
-                            if TPFN[i][t_i][1]=='TP' and d_bbox[-1] > TPFN[i][t_i][0]: # 더 높은 iou를 가진 값이 아닌 confidenc를 우선순위로
-                                TPFN[i][t_i] = [d_bbox[-1],"TP", d_i]
-                                TPFP[cl][i][d_i] = [d_bbox[-1],"TP"]
-                                TPFP[cl][i][d_i][1] = "FP"
+                            if TPFN[i][t_i][1]=='TP' and iou > TPFN[i][t_i][2]: # 가장 높은 iou를 가진 값을 채택
+                                past_d_i =  TPFN[i][t_i][-1]
+                                TPFN[i][t_i] = [d_bbox[-1], "TP", iou, d_i]
+                                TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i]
+                                TPFP[cl][i][past_d_i][1] = "FP"
                                 
                             elif TPFN[i][t_i][1]=='FN':
-                                TPFN[i][t_i] = [d_bbox[-1],"TP", d_i]
-                                TPFP[cl][i][d_i] = [d_bbox[-1],"TP"]                            
+                                TPFN[i][t_i] = [d_bbox[-1],"TP", iou, d_i]
+                                TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i]                            
                 else:
                     continue
             
     return TPFN, TPFP
 
+def get_ap(tp_n, fp_n, fn_n, detect_list):
+    detect_list.sort(key = lambda i : -i[0])
+    recall = [] 
+    precison = []
+    tp_count = 0.
+    fp_count = 0.
+    ap = 0
+    
+    for conf, _type in detect_list:
+        if _type == "FP":
+            fp_count += 1
+            
+            recall_v = tp_count / (tp_n + fn_n)
+            precison_v = tp_count / (tp_count + fp_count)
+            
+            recall.append(recall_v)
+            precison.append(precison_v)
+            
+        elif _type == "TP": 
+            tp_count += 1
+            
+            recall_v = tp_count / (tp_n + fn_n)
+            precison_v = tp_count / (tp_count + fp_count)
+            
+            recall.append(recall_v)
+            precison.append(precison_v)
+            
+    recall = np.array(recall)
+    precison = np.array(precison)
+    '''        
+    11-point interpolation 방식 
+    해당 코드 연산비용은 all point 방식과 비슷, 연습겸 작성한 코드
+    '''
+
+    recallRange = [x / 10. for x in range(0,11,1)]
+    area = []
+    for r in recallRange:
+        Recalls = np.argwhere(recall >= r)
+        pmax = 0
+
+        if Recalls.size != 0:
+            pmax = max(precison[Recalls.min():])
+
+        area.append(pmax)
+
+    ap = sum(area) / 11 # len(recallRange)
+    
+    return ap
 def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
     
     d=default()
@@ -80,7 +142,8 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
     model.to(device)
     
     w, h = image_size #임시
-    ap=[]
+    
+    ap = 0
     total_Recall = 0
     total_Precison = 0
     N=0
@@ -131,14 +194,14 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
         
         for batch_TPFN in TPFN:
             for real_det in batch_TPFN:
-                con, state, _ = real_det
+                con, state = real_det[:2]
                 if state=="FN":
                     total_FN+=1
                     
                 if state=="TP":
                     total_TP_1+=1
                     
-        TPFP_cls_filter=[[] for _ in range(output.size(1))] #n_class
+        TPFP_cls_filter=[[] for _ in range(output.size(1))] #n_class AP 계산용
         TPFP_filter=[] # total AP 계산용
         for cls_idx, cls_TPFP in enumerate(TPFP):
             if cls_idx == 0:
@@ -148,7 +211,7 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                 for pred_det in batch_TPFP:
                     if len(pred_det) == 0:
                         continue
-                    con, state = pred_det
+                    con, state = pred_det[:2]
                     
                     if state=="FP":
                         total_FP+=1
@@ -156,25 +219,26 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                     if state=="TP":
                         total_TP_2+=1
                         
-                    TPFP_cls_list.append(pred_det)
-                    TPFP_filter.append(pred_det)
+                    TPFP_cls_list.append(pred_det[:2])
+                    TPFP_filter.append(pred_det[:2])
                     
             TPFP_cls_filter[cls_idx] = TPFP_cls_list
         
-        print(TPFP)
-        print(TPFN)
-        print(total_TP_1,total_TP_2)
-        print(total_FP,total_FN)
-        
+        #print(TPFP)
+        #print(TPFN)
+        #print(total_TP_1,total_TP_2)
+        #print(total_FP,total_FN)
         
         Precison = total_TP_1 / (total_TP_1 + total_FP) 
         Recall = total_TP_1 / (total_TP_1 + total_FN) #total_labels
         total_Recall += Recall
         total_Precison += Precison
+        
+        ap +=  get_ap(total_TP_1, total_FP, total_FN, TPFP_filter)
         N = idx+1
         
     total_Recall /= N
     total_Precison /= N
-    
-    return total_Recall, total_Precison, ap
+    mAP = ap / N
+    return total_Recall, total_Precison, mAP
 
