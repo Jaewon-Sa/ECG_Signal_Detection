@@ -16,6 +16,7 @@ import math
 import torchaudio
 import cv2
 import cmapy
+import random
 
 
 class Biquad:
@@ -159,6 +160,7 @@ class CustomDataset(Dataset):
                  n_fft=1024,
                  win_length=800,
                  filter_params=False,
+                 padding_type=0,
                  multi_channels=False,
                  clipping=False,
                  target_size=(300, 300),
@@ -173,6 +175,7 @@ class CustomDataset(Dataset):
         self.win_length = win_length
 
         self.filter_params = filter_params
+        self.padding_type = padding_type
         self.multi_channels = multi_channels
         self.clipping = clipping
         self.target_size = target_size
@@ -259,10 +262,47 @@ class CustomDataset(Dataset):
         # print(row)
         return transforms.ToTensor()(copy)
 
-    def padding(self, spec, target_length, padding_value=0):
-        pad_width = target_length - spec.shape[-1]
-        padded_spec = torch.nn.functional.pad(spec, (0, pad_width, 0, 0), "constant", 0)
+    def padding(self, spec, target_length, types):
+        if types == 0:
+            padded_spec = self.zero_padding(spec, target_length, types)
+        elif types == 1:
+            padded_spec = self.another_padding(spec, target_length, types)
         return padded_spec
+
+    def zero_padding(self, spec, target_length, pad_position=0):
+        pad_width = target_length - spec.shape[-1]
+        # 뒷부분에 zero padding
+        if pad_position < 0.5:
+            padded_spec = torch.nn.functional.pad(spec, (0, pad_width, 0, 0), "constant", 0)
+        # 앞부분에 zero padding
+        else:
+            padded_spec = torch.nn.functional.pad(spec, (pad_width, 0, 0, 0), "constant", 0)
+        return padded_spec
+
+    def another_padding(self, spec, target_length, types):
+        pad_width = target_length - spec.shape[-1]
+        prob = random.random()
+        padded_spec = self.zero_padding(spec, target_length, prob)
+        if types == 1:
+            aug = spec
+        else:
+            aug = self.gen_augmented()
+        # 뒷부분에 padding
+        if prob < 0.5:
+            padded_spec[:, padded_spec.shape[-1] - pad_width:] = aug[:, :pad_width]
+            pad_width /=  self.sample_rate
+            # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
+            self.padding_list.append((1, 1, pad_width))
+        # 앞부분에 padding
+        else:
+            padded_spec[:, :pad_width] = aug[:, :pad_width]
+            pad_width /=  self.sample_rate
+            # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
+            self.padding_list.append((1, 0, pad_width))
+        return padded_spec
+
+    def gen_augmented(self):
+        return 0
 
     def resize_spectrogram(self, spec, new_shape):
         resized_spec = transforms.functional.resize(img=spec, size=new_shape, antialias=None)
@@ -291,6 +331,7 @@ class CustomDataset(Dataset):
                                                 amin=1e-10,
                                                 db_multiplier=1.0,
                                                 top_db=80.0)
+
         # 0~1로 정규화
         spec = self.normalize_spectrogram(spec)
         # 3채널 기능
@@ -303,10 +344,30 @@ class CustomDataset(Dataset):
         spec = self.resize_spectrogram(spec, self.target_size)
         return spec
 
+    def padded_df(self, df, pad_position, pad_width, _iter):
+        copied_rows = df.iloc[0:, :]
+        padded_rows = copied_rows.copy()
+        original_size = self.th / (self.sample_rate / self.hop_length) * _iter
+        # print(original_size, _iter, pad_width)
+        # 패딩 위치가 뒤
+        if pad_position == 1:
+            padded_rows[0] += (original_size - pad_width)
+            padded_rows[1] += (original_size - pad_width)
+            result_df = pd.concat([df, padded_rows], axis=0)
+        # 패딩 위치가 앞
+        else:
+            top_rows = copied_rows[(copied_rows[0] >= 0) & (copied_rows[0] < pad_width)].copy()
+            top_rows[1] = top_rows[1].clip(0, pad_width)
+            padded_rows[0] += pad_width
+            padded_rows[1] += pad_width
+            result_df = pd.concat([top_rows, padded_rows], axis=0)
+        return result_df
+
     def get_mel_spectrogram(self):
         audio_list = []
         self.iter_list = []
         self.blank_row_list = []
+        self.padding_list = []
 
         for path_wav in self.wavs:
             path = os.path.join(self.path, path_wav)
@@ -318,17 +379,17 @@ class CustomDataset(Dataset):
                 x = self.apply_filter(x)
             # 구간 = i * frame_offset: i * frame_offset + num_frames
             frame_offset, num_frames = self.th * self.hop_length, self.th * self.hop_length
-            num_splits = x.shape[-1] // num_frames  # wav길이 == num_frames의 배수
-            if x.shape[-1] % num_frames != 0:   # wav길이 != num_frames의 배수
-                num_splits += 1
+            num_splits = math.ceil(x.shape[-1] / num_frames)  # 나눌 개수
+            # 오디오 파일이 num_splits * num_frames보다 짧을 경우
+            if x.shape[-1] < num_splits * num_frames:
+                # Padding
+                x = self.padding(x, num_splits * num_frames, self.padding_type)
+            else: self.padding_list.append(0)
             # 오디오 파일이 num_frames보다 긴 경우
             if x.shape[-1] > num_frames:
                 self.iter_list.append(num_splits)
                 for i in range(num_splits):
                     split = x[:, i * frame_offset:i * frame_offset + num_frames]
-                    if split.shape[-1] < num_frames:
-                        # Zero Padding
-                        split = self.padding(split, num_frames)
                     # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
                     split = self.processing(split)
                     audio_list.append(split)
@@ -336,10 +397,6 @@ class CustomDataset(Dataset):
             # 원본 wav의 길이가 num_frames보다 짧거나 같다면
             else:
                 self.iter_list.append(1)
-                # num_frames보다 짧다면
-                if x.shape[-1] < num_frames:
-                    # Padding
-                    x = self.padding(x, num_frames)
                 # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
                 x = self.processing(x)
                 audio_list.append(x)
@@ -353,6 +410,16 @@ class CustomDataset(Dataset):
             path = os.path.join(self.path, path_tsv)
             tsv_data = pd.read_csv(path, sep='\t', header=None)
             iter = self.iter_list[i]
+
+            # self.padding_type이 0이 아닌 경우(1, 2인 경우)
+            if self.padding_type != 0 and self.padding_list[i] != 0:
+                # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
+                pad_info = self.padding_list[i]
+                if self.padding_type != 0:
+                    # print(tsv_data)
+                    tsv_data = self.padded_df(tsv_data, pad_info[1], pad_info[2], iter)
+                    # print(tsv_data)
+
             for _iter in range(iter):
                 label = []
                 if self.clipping is True:
@@ -368,7 +435,7 @@ class CustomDataset(Dataset):
                         tsv_row[2] = 1 if tsv_row[2] == 1 else 2    # S1=1, S2=2
                         # 시작점 혹은 끝점이 구간 안에 존재한다면
                         if (0 <= tsv_row[0] < self.th or \
-                            self.th >= tsv_row[1] > 0):
+                            0 < tsv_row[1] <= self.th):
                             # 시작점이 0보다 작은 경우 0으로
                             if tsv_row[0] < 0:
                                 tsv_row[0] = 0
