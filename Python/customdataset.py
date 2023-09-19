@@ -17,6 +17,7 @@ import torchaudio
 import cv2
 import cmapy
 import random
+import nlpaug.augmenter.audio as naa
 
 
 class Biquad:
@@ -212,15 +213,8 @@ class CustomDataset(Dataset):
         self.tsvs.sort()
 
     def apply_filter(self, audio):
-        # 필터 파라미터가 3개 이하일 경우 개수만큼 적용
-        if len(self.filter_params) <= 3:
-            for filter_param in self.filter_params:
-                audio = self.filter_torchaudio(audio, filter_param)
-        # 필터 파라미터가 1개일 경우 필터 1회 적용
-        elif len(self.filter_params) in [4, 5]:
-            audio = self.filter_torchaudio(audio, self.filter_params)
-        else:
-            raise ValueError("3개 이하의 필터를 적용해주세요.")
+        for filter_param in self.filter_params:
+            audio = self.filter_torchaudio(audio, filter_param)
         return audio
 
     # torchaudio로 필터링 적용
@@ -265,7 +259,7 @@ class CustomDataset(Dataset):
     def padding(self, spec, target_length, types):
         if types == 0:
             padded_spec = self.zero_padding(spec, target_length, types)
-        elif types == 1:
+        else:
             padded_spec = self.another_padding(spec, target_length, types)
         return padded_spec
 
@@ -286,23 +280,27 @@ class CustomDataset(Dataset):
         if types == 1:
             aug = spec
         else:
-            aug = self.gen_augmented()
+            aug = self.gen_augmented(spec)
         # 뒷부분에 padding
         if prob < 0.5:
             padded_spec[:, padded_spec.shape[-1] - pad_width:] = aug[:, :pad_width]
-            pad_width /=  self.sample_rate
-            # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
-            self.padding_list.append((1, 1, pad_width))
         # 앞부분에 padding
         else:
             padded_spec[:, :pad_width] = aug[:, :pad_width]
-            pad_width /=  self.sample_rate
-            # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
-            self.padding_list.append((1, 0, pad_width))
+        pad_width /= self.sample_rate
+        # 패딩 타입(1, 2), 패딩 위치(뒤: prob<0.5, 앞: prob>=0.5), 패딩 길이(단위: 초)
+        self.padding_list.append((types, prob, pad_width))
         return padded_spec
 
-    def gen_augmented(self):
-        return 0
+    def gen_augmented(self, spec):
+        augment_list = [naa.NoiseAug(),
+                        naa.LoudnessAug(factor=(0.5, 2)),
+                        naa.PitchAug(sampling_rate=self.sample_rate, factor=(-1, 3))
+                        ]
+        aug_idx = random.randint(0, len(augment_list) - 1)
+        augmented_data = augment_list[aug_idx].augment(spec.numpy()[0])
+        augmented_data = torch.from_numpy(np.array(augmented_data))
+        return augmented_data
 
     def resize_spectrogram(self, spec, new_shape):
         resized_spec = transforms.functional.resize(img=spec, size=new_shape, antialias=None)
@@ -350,7 +348,7 @@ class CustomDataset(Dataset):
         original_size = self.th / (self.sample_rate / self.hop_length) * _iter
         # print(original_size, _iter, pad_width)
         # 패딩 위치가 뒤
-        if pad_position == 1:
+        if pad_position < 0.5:
             padded_rows[0] += (original_size - pad_width)
             padded_rows[1] += (original_size - pad_width)
             result_df = pd.concat([df, padded_rows], axis=0)
