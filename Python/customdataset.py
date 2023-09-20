@@ -160,6 +160,7 @@ class CustomDataset(Dataset):
                  n_mels=128,
                  n_fft=1024,
                  win_length=800,
+                 augmentation=False,
                  filter_params=False,
                  padding_type=0,
                  multi_channels=False,
@@ -175,6 +176,7 @@ class CustomDataset(Dataset):
         self.n_fft = n_fft
         self.win_length = win_length
 
+        self.augmentation = augmentation
         self.filter_params = filter_params
         self.padding_type = padding_type
         self.multi_channels = multi_channels
@@ -280,7 +282,7 @@ class CustomDataset(Dataset):
         if types == 1:
             aug = spec
         else:
-            aug = self.gen_augmented(spec)
+            aug = self.gen_augmented(spec, padding_mode=True)
         # 뒷부분에 padding
         if prob < 0.5:
             padded_spec[:, padded_spec.shape[-1] - pad_width:] = aug[:, :pad_width]
@@ -288,19 +290,29 @@ class CustomDataset(Dataset):
         else:
             padded_spec[:, :pad_width] = aug[:, :pad_width]
         pad_width /= self.sample_rate
-        # 패딩 타입(1, 2), 패딩 위치(뒤: prob<0.5, 앞: prob>=0.5), 패딩 길이(단위: 초)
-        self.padding_list.append((types, prob, pad_width))
+        # 패딩 위치(뒤: prob<0.5, 앞: prob>=0.5), 패딩 길이(단위: 초)
+        self.padding_list.append((prob, pad_width))
         return padded_spec
 
-    def gen_augmented(self, spec):
+    def gen_augmented(self, spec, padding_mode):
         augment_list = [naa.NoiseAug(),
                         naa.LoudnessAug(factor=(0.5, 2)),
                         naa.PitchAug(sampling_rate=self.sample_rate, factor=(-1, 3))
                         ]
-        aug_idx = random.randint(0, len(augment_list) - 1)
-        augmented_data = augment_list[aug_idx].augment(spec.numpy()[0])
-        augmented_data = torch.from_numpy(np.array(augmented_data))
-        return augmented_data
+        # 패딩에 augmentation 사용하는 경우
+        if padding_mode is True:
+            aug_idx = random.randint(0, len(augment_list) - 1)
+            augmented_data = augment_list[aug_idx].augment(spec.numpy()[0])
+            augmented_data = torch.from_numpy(np.array(augmented_data))
+            return augmented_data
+        # 데이터에 augmentation 사용하는 경우
+        else:
+            augmented_data_list = [spec]
+            for aug in augment_list:
+                augmented_data = aug.augment(spec.numpy()[0])
+                augmented_data = torch.from_numpy(np.array(augmented_data))
+                augmented_data_list.append(augmented_data)
+            return augmented_data_list
 
     def resize_spectrogram(self, spec, new_shape):
         resized_spec = transforms.functional.resize(img=spec, size=new_shape, antialias=None)
@@ -370,35 +382,43 @@ class CustomDataset(Dataset):
         for path_wav in self.wavs:
             path = os.path.join(self.path, path_wav)
             # Torchaudio 이용하여 파일 로드
-            x, org_sr = torchaudio.load(path)
-            x = torchaudio.functional.resample(x, orig_freq=org_sr, new_freq=self.sample_rate)
-            # Filtering
-            if self.filter_params != False:
-                x = self.apply_filter(x)
-            # 구간 = i * frame_offset: i * frame_offset + num_frames
-            frame_offset, num_frames = self.th * self.hop_length, self.th * self.hop_length
-            num_splits = math.ceil(x.shape[-1] / num_frames)  # 나눌 개수
-            # 오디오 파일이 num_splits * num_frames보다 짧을 경우
-            if x.shape[-1] < num_splits * num_frames:
-                # Padding
-                x = self.padding(x, num_splits * num_frames, self.padding_type)
-            else: self.padding_list.append(0)
-            # 오디오 파일이 num_frames보다 긴 경우
-            if x.shape[-1] > num_frames:
-                self.iter_list.append(num_splits)
-                for i in range(num_splits):
-                    split = x[:, i * frame_offset:i * frame_offset + num_frames]
-                    # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
-                    split = self.processing(split)
-                    audio_list.append(split)
-                # break
-            # 원본 wav의 길이가 num_frames보다 짧거나 같다면
+            d, org_sr = torchaudio.load(path)
+            d = torchaudio.functional.resample(d, orig_freq=org_sr, new_freq=self.sample_rate)
+
+            # 데이터 어그멘테이션
+            if self.augmentation is True:
+                data_list = self.gen_augmented(d, padding_mode=False)
             else:
-                self.iter_list.append(1)
-                # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
-                x = self.processing(x)
-                audio_list.append(x)
-                # break
+                data_list = [d]
+            for x in data_list:
+                # Filtering
+                if self.filter_params != False:
+                    x = self.apply_filter(x)
+                # 구간 = i * frame_offset: i * frame_offset + num_frames
+                frame_offset, num_frames = self.th * self.hop_length, self.th * self.hop_length
+                num_splits = math.ceil(x.shape[-1] / num_frames)  # 나눌 개수
+                # 오디오 파일이 num_splits * num_frames보다 짧을 경우
+                if x.shape[-1] < num_splits * num_frames:
+                    # Padding
+                    x = self.padding(x, num_splits * num_frames, self.padding_type)
+                else: self.padding_list.append(0)
+                # 오디오 파일이 num_frames보다 긴 경우
+                if x.shape[-1] > num_frames:
+                    self.iter_list.append(num_splits)
+                    for i in range(num_splits):
+                        split = x[:, i * frame_offset:i * frame_offset + num_frames]
+                        # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
+                        split = self.processing(split)
+                        audio_list.append(split)
+                    # break
+                # 원본 wav의 길이가 num_frames보다 짧거나 같다면
+                else:
+                    self.iter_list.append(1)
+                    # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
+                    x = self.processing(x)
+                    audio_list.append(x)
+                    # break
+        # print(len(audio_list), len(self.iter_list), len(self.blank_row_list), len(self.padding_list))
         return torch.stack(audio_list)
 
     def get_label(self):
@@ -406,55 +426,61 @@ class CustomDataset(Dataset):
         idx = 0
         for i, path_tsv in enumerate(self.tsvs):
             path = os.path.join(self.path, path_tsv)
-            tsv_data = pd.read_csv(path, sep='\t', header=None)
-            iter = self.iter_list[i]
-
-            # self.padding_type이 0이 아닌 경우(1, 2인 경우)
-            if self.padding_type != 0 and self.padding_list[i] != 0:
-                # 패딩 타입(1, 2), 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
-                pad_info = self.padding_list[i]
-                if self.padding_type != 0:
-                    # print(tsv_data)
-                    tsv_data = self.padded_df(tsv_data, pad_info[1], pad_info[2], iter)
-                    # print(tsv_data)
-
-            for _iter in range(iter):
-                label = []
-                if self.clipping is True:
-                    blank_row = self.blank_row_list[sum(self.iter_list[:i]) + _iter]
+            orig_tsv_data = pd.read_csv(path, sep='\t', header=None)
+            # Augmentation을 사용한다면 4회 반복, 아니라면 1회
+            for j in range(4 if self.augmentation is True else 1):
+                # Augmentation 유무에 따라 사용할 _idx 변경
+                if self.augmentation is True:
+                    _idx = i * 4 + j
                 else:
-                    blank_row = self.target_size[0]
-                for _, tsv_row in tsv_data.iterrows():
-                    # S1, S2에 속한다면
-                    if tsv_row[2] in [1, 3]:
-                        # 구간 불러와서 sr값 곱하고 hop_legth로 나누기
-                        tsv_row[0] = tsv_row[0] * self.sample_rate / self.hop_length - (_iter * self.th)
-                        tsv_row[1] = tsv_row[1] * self.sample_rate / self.hop_length - (_iter * self.th)
-                        tsv_row[2] = 1 if tsv_row[2] == 1 else 2    # S1=1, S2=2
-                        # 시작점 혹은 끝점이 구간 안에 존재한다면
-                        if (0 <= tsv_row[0] < self.th or \
-                            0 < tsv_row[1] <= self.th):
-                            # 시작점이 0보다 작은 경우 0으로
-                            if tsv_row[0] < 0:
-                                tsv_row[0] = 0
-                            # 끝점이 구간보다 큰 경우 구간의 끝점으로
-                            if tsv_row[1] > self.th:
-                                tsv_row[1] = self.th
-                            # 최종 resize한 값 으로 보간
-                            tsv_row[0] *= (self.target_size[1] - 1) / self.th
-                            tsv_row[1] *= (self.target_size[1] - 1) / self.th
-                            label.append([tsv_row[0] / self.target_size[1], 0 / self.target_size[0],
-                                tsv_row[1] / self.target_size[1], blank_row / self.target_size[0],
-                                int(tsv_row[2])])# xmin, ymin, xmax, ymax, cls
-                        # 시작점 혹은 끝점이 구간 안에 존재하지 않는다면
+                    _idx = i
+                    tsv_data = orig_tsv_data.copy()
+                iter = self.iter_list[_idx]
+                # self.padding_type이 0이 아닌 경우(1, 2인 경우)
+                if self.padding_type != 0 and self.padding_list[_idx] != 0:
+                    # 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
+                    pad_info = self.padding_list[_idx]
+                    tsv_data = self.padded_df(orig_tsv_data, pad_info[0], pad_info[1], iter)
+                # 한 이미지당 split의 개수만큼 반복
+                for _iter in range(iter):
+                    label = []
+                    # blank clipping row 불러오기
+                    if self.clipping is True:
+                        blank_row = self.blank_row_list[sum(self.iter_list[:_idx]) + _iter]
+                    else:
+                        blank_row = self.target_size[0]
+                    for _, tsv_row in tsv_data.iterrows():
+                        # S1, S2에 속한다면
+                        if tsv_row[2] in [1, 3]:
+                            # 구간 불러와서 sr값 곱하고 hop_legth로 나누기
+                            tsv_row[0] = tsv_row[0] * self.sample_rate / self.hop_length - (_iter * self.th)
+                            tsv_row[1] = tsv_row[1] * self.sample_rate / self.hop_length - (_iter * self.th)
+                            tsv_row[2] = 1 if tsv_row[2] == 1 else 2    # S1=1, S2=2
+                            # 시작점 혹은 끝점이 구간 안에 존재한다면
+                            if (0 <= tsv_row[0] < self.th or \
+                                0 < tsv_row[1] <= self.th):
+                                # 시작점이 0보다 작은 경우 0으로
+                                if tsv_row[0] < 0:
+                                    tsv_row[0] = 0
+                                # 끝점이 구간보다 큰 경우 구간의 끝점으로
+                                if tsv_row[1] > self.th:
+                                    tsv_row[1] = self.th
+                                # 최종 resize한 값 으로 보간
+                                tsv_row[0] *= (self.target_size[1] - 1) / self.th
+                                tsv_row[1] *= (self.target_size[1] - 1) / self.th
+                                label.append([tsv_row[0] / self.target_size[1], 0 / self.target_size[0],
+                                    tsv_row[1] / self.target_size[1], blank_row / self.target_size[0],
+                                    int(tsv_row[2])])# xmin, ymin, xmax, ymax, cls
+                            # 시작점 혹은 끝점이 구간 안에 존재하지 않는다면
+                            else: continue
+                        # S1, S2에 속하면서 시작점 혹은 끝점이 구간 안에 존재하는 경우를 제외한 나머지 경우
                         else: continue
-                    # S1, S2에 속하면서 시작점 혹은 끝점이 구간 안에 존재하는 경우를 제외한 나머지 경우
-                    else: continue
-                if(len(label)==0):
-                    self.delete_list.append(idx)
-                idx += 1
-                labels.append(label)
+                    if(len(label)==0):
+                        self.delete_list.append(idx)
+                    idx += 1
+                    labels.append(label)
             # break
+        # print(len(labels))
         return labels
 
     def delete_data(self):
