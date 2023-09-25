@@ -163,6 +163,8 @@ class CustomDataset(Dataset):
                  augmentation=False,
                  filter_params=False,
                  padding_type=0,
+                 freq_mask=False,
+                 time_mask=False,
                  multi_channels=False,
                  clipping=False,
                  target_size=(300, 300),
@@ -179,6 +181,8 @@ class CustomDataset(Dataset):
         self.augmentation = augmentation
         self.filter_params = filter_params
         self.padding_type = padding_type
+        self.freq_mask = freq_mask
+        self.time_mask = time_mask
         self.multi_channels = multi_channels
         self.clipping = clipping
         self.target_size = target_size
@@ -187,9 +191,7 @@ class CustomDataset(Dataset):
         self.get_file_list()
 
         self.delete_list = []
-        self.x = self.get_mel_spectrogram()
-        self.y = self.get_label()
-        self.delete_data()
+        self.x, self.y = self.get_mel_spectrogram()
 
     def __len__(self):
         return len(self.x)
@@ -234,37 +236,6 @@ class CustomDataset(Dataset):
         )
         return _filtered_audio
 
-    def blank_clipping(self, img):
-        img[img < 10/255] = 0
-        img = np.transpose(np.array(img), (1, 2, 0))  # 텐서 > 넘파이
-        # 3채널 이미지의 경우
-        if self.multi_channels is True:
-            copy = img.copy()   # 사본 생성
-            img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)   # 흑백으로
-        # 1채널 이미지의 경우
-        else:
-            copy = img
-        # 행별로 black_percent 계산
-        for row in range(img.shape[0] - 1, 0, -1):
-            black_percent = len(np.where(img[row,:]==0)[0])/len(img[row,:])
-            if black_percent < 0.80:
-                break
-        # # clipping
-        # if (row - 1) > 0:
-        #     copy = copy[:(row - 1), :, :]
-        # print(row)
-        row = row * self.target_size[0] / img.shape[0]
-        self.blank_row_list.append(row)
-        # print(row)
-        return transforms.ToTensor()(copy)
-
-    def padding(self, spec, target_length, types):
-        if types == 0:
-            padded_spec = self.zero_padding(spec, target_length, types)
-        else:
-            padded_spec = self.another_padding(spec, target_length, types)
-        return padded_spec
-
     def zero_padding(self, spec, target_length, pad_position=0):
         pad_width = target_length - spec.shape[-1]
         # 뒷부분에 zero padding
@@ -275,24 +246,37 @@ class CustomDataset(Dataset):
             padded_spec = torch.nn.functional.pad(spec, (pad_width, 0, 0, 0), "constant", 0)
         return padded_spec
 
-    def another_padding(self, spec, target_length, types):
+    def another_padding(self, spec, target_length, types, df, _iter):
         pad_width = target_length - spec.shape[-1]
         prob = random.random()
         padded_spec = self.zero_padding(spec, target_length, prob)
+
+        copied_rows = df.iloc[0:, :]
+        padded_rows = copied_rows.copy()
+        original_size = self.th / (self.sample_rate / self.hop_length) * _iter
+        pad_width_df = pad_width / self.sample_rate
+
+        # 원본 복사
         if types == 1:
             aug = spec
+        # 원본에 어그멘테이션 적용
         else:
             aug = self.gen_augmented(spec, padding_mode=True)
         # 뒷부분에 padding
         if prob < 0.5:
             padded_spec[:, padded_spec.shape[-1] - pad_width:] = aug[:, :pad_width]
+            padded_rows[0] += (original_size - pad_width_df)
+            padded_rows[1] += (original_size - pad_width_df)
+            result_df = pd.concat([df, padded_rows], axis=0)
         # 앞부분에 padding
         else:
             padded_spec[:, :pad_width] = aug[:, :pad_width]
-        pad_width /= self.sample_rate
-        # 패딩 위치(뒤: prob<0.5, 앞: prob>=0.5), 패딩 길이(단위: 초)
-        self.padding_list.append((prob, pad_width))
-        return padded_spec
+            top_rows = copied_rows[(copied_rows[0] >= 0) & (copied_rows[0] < pad_width_df)].copy()
+            top_rows[1] = top_rows[1].clip(0, pad_width_df)
+            padded_rows[0] += pad_width_df
+            padded_rows[1] += pad_width_df
+            result_df = pd.concat([top_rows, padded_rows], axis=0)
+        return padded_spec, result_df
 
     def gen_augmented(self, spec, padding_mode):
         augment_list = [naa.NoiseAug(),
@@ -314,46 +298,6 @@ class CustomDataset(Dataset):
                 augmented_data_list.append(augmented_data)
             return augmented_data_list
 
-    def resize_spectrogram(self, spec, new_shape):
-        resized_spec = transforms.functional.resize(img=spec, size=new_shape, antialias=None)
-        return resized_spec
-
-    def normalize_spectrogram(self, spec):
-        normalized = (spec-spec.min()) / (spec.max() - spec.min())
-        return normalized
-
-    def change_channels(self, spec):
-        spec *= 255
-        spec = np.array(spec[0])
-        spec = spec.astype(np.uint8)
-        spec = cv2.applyColorMap(spec.astype(np.uint8), cmapy.cmap('magma'))
-        spec = transforms.ToTensor()(spec)
-        return spec
-
-    def processing(self, spec):
-        # 멜스펙트로그램 변환
-        spec = ta_transforms.MelSpectrogram(sample_rate=self.sample_rate,
-                                        n_fft=self.n_fft,
-                                        win_length=self.win_length,
-                                        n_mels=self.n_mels,
-                                        hop_length=self.hop_length)(spec)
-        spec = torchaudio.functional.amplitude_to_DB(spec, multiplier=10.,
-                                                amin=1e-10,
-                                                db_multiplier=1.0,
-                                                top_db=80.0)
-
-        # 0~1로 정규화
-        spec = self.normalize_spectrogram(spec)
-        # 3채널 기능
-        if self.multi_channels is True:
-            spec = self.change_channels(spec)
-        # Blank region clipping
-        if self.clipping is True:
-            spec = self.blank_clipping(spec)
-        # 최종 Resizing
-        spec = self.resize_spectrogram(spec, self.target_size)
-        return spec
-
     def padded_df(self, df, pad_position, pad_width, _iter):
         copied_rows = df.iloc[0:, :]
         padded_rows = copied_rows.copy()
@@ -373,17 +317,166 @@ class CustomDataset(Dataset):
             result_df = pd.concat([top_rows, padded_rows], axis=0)
         return result_df
 
+    def process_label(self, tsv_data, _iter):
+        label = []
+        for _, tsv_row in tsv_data.iterrows():
+            # S1, S2에 속한다면
+            if tsv_row[2] in [1, 3]:
+                # 구간 불러와서 sr곱하고 hop_length로 나누기
+                tsv_row[0] = tsv_row[0] * self.sample_rate / self.hop_length - (_iter * self.th)
+                tsv_row[1] = tsv_row[1] * self.sample_rate / self.hop_length - (_iter * self.th)
+                tsv_row[2] = 1 if tsv_row[2] == 1 else 2 # S1=1, S2=2
+                # 시작점 혹은 끝점이 구간 안에 존재한다면
+                if (0 <= tsv_row[0] < self.th or \
+                    0 < tsv_row[1] <= self.th):
+                    # 시작점이 0보다 작은 경우 0으로
+                    if tsv_row[0] < 0:
+                        tsv_row[0] = 0
+                    # 끝점이 구간보다 큰 경우 구간의 끝점으로
+                    if tsv_row[1] > self.th:
+                        tsv_row[1] = self.th
+                    # 최종 resize한 값으로 스케일링
+                    tsv_row[0] *= (self.target_size[1] - 1) / self.th
+                    tsv_row[1] *= (self.target_size[1] - 1) / self.th
+                    label.append([tsv_row[0] / self.target_size[1], 0,
+                                tsv_row[1] / self.target_size[1], 1,
+                                int(tsv_row[2])])
+                # 시작점 혹은 끝점이 구간 안에 존재하지 않는다면
+                else: continue
+            # S1, S2에 속하면서 시작점 혹은 끝점이 구간 안에 존재하는 경우를 제외한 나머지 경우
+            else: continue
+        return label
+
+    def masking(self, spec, label):
+        # Freqeuncy masking
+        if self.freq_mask != False:
+            # 정해진 확률에 속할 경우 masking
+            if random.random() <= self.freq_mask[0]:
+                    spec = ta_transforms.FrequencyMasking(freq_mask_param=self.freq_mask[1] * spec.shape[1])(spec)
+            masked_label = label.copy()
+        # Time masking
+        if self.time_mask != False:
+            # 정해진 확률에 속할 경우 masking
+            if random.random() <= self.time_mask[0]:
+                masked_label = []
+                orig_spec = spec
+                spec = ta_transforms.TimeMasking(time_mask_param=self.time_mask[1] * spec.shape[-1])(spec)
+                # 마스킹 부분 라벨 제거
+                if self.time_mask[2] is True:
+                    # 일반적인 경우
+                    try:
+                        start = np.min(np.where(spec != orig_spec)[-1]) / spec.shape[-1]
+                        end = np.max(np.where(spec != orig_spec)[-1]) / spec.shape[-1]
+                        # print(start, end)
+                        for l in label:
+                            # 라벨이 마스크 영역보다 큰 경우
+                            if start > l[0] and l[2] > end:
+                                masked_label.append([l[0], l[1], start, l[3], l[4]])
+                                masked_label.append([end, l[1], l[2], l[3], l[4]])
+                            # 라벨의 끝점이 마스크 영역 안에 있는 경우
+                            elif l[0] < start and start <= l[2]:
+                                l[2] = start
+                                masked_label.append(l)
+                            # 라벨의 시작점이 마스크 영역 안에 있는 경우
+                            elif l[0] <= end and end < l[2]:
+                                l[0] = end
+                                masked_label.append(l)
+                            # 그 외의 모든 경우 중 라벨이 마스크 보다 작지 않은 경우
+                            elif not(start < l[0] and l[2] < end):
+                                masked_label.append(l)
+                    # 제로패딩 영역에 마스킹이 들어가 라벨에 변경이 없을 경우
+                    except:
+                        masked_label = label.copy()
+                # 라벨 보존
+                else:
+                    masked_label = label.copy()
+            # 확률에 속하지 않아 masking을 실시하지 않은 경우
+            else:
+                masked_label = label.copy()
+        return spec, masked_label
+
+    def normalize_spectrogram(self, spec):
+        normalized = (spec-spec.min()) / (spec.max() - spec.min())
+        return normalized
+
+    def change_channels(self, spec):
+        spec *= 255
+        spec = np.array(spec[0])
+        spec = spec.astype(np.uint8)
+        spec = cv2.applyColorMap(spec.astype(np.uint8), cmapy.cmap('magma'))
+        spec = transforms.ToTensor()(spec)
+        return spec
+
+    def blank_clipping(self, img):
+        img[img < 10/255] = 0
+        img = np.transpose(np.array(img), (1, 2, 0))  # 텐서 > 넘파이
+        # 3채널 이미지의 경우
+        if self.multi_channels is True:
+            copy = img.copy()   # 사본 생성
+            img = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)   # 흑백으로
+        # 1채널 이미지의 경우
+        else:
+            copy = img
+        # 행별로 black_percent 계산
+        for row in range(img.shape[0] - 1, 0, -1):
+            black_percent = len(np.where(img[row,:]==0)[0])/len(img[row,:])
+            print(black_percent)
+            if black_percent < 0.80:
+                break
+        # # clipping
+        # if (row - 1) > 0:
+        #     copy = copy[:(row - 1), :, :]
+        # print(row)
+        row = (row + 1) * self.target_size[0] / img.shape[0]
+        # print(row)
+        return transforms.ToTensor()(copy), row
+
+    def resize_spectrogram(self, spec, new_shape):
+        resized_spec = transforms.functional.resize(img=spec, size=new_shape, antialias=None)
+        return resized_spec
+
+    def process_data(self, spec, label):
+        # 멜스펙트로그램 변환
+        spec = ta_transforms.MelSpectrogram(sample_rate=self.sample_rate,
+                                        n_fft=self.n_fft,
+                                        win_length=self.win_length,
+                                        n_mels=self.n_mels,
+                                        hop_length=self.hop_length)(spec)
+
+        spec = torchaudio.functional.amplitude_to_DB(spec, multiplier=10.,
+                                        amin=1e-10,
+                                        db_multiplier=1.0,
+                                        top_db=80.0)
+
+        # 0~1로 정규화
+        spec = self.normalize_spectrogram(spec)
+        # 3채널 기능
+        if self.multi_channels is True:
+            spec = self.change_channels(spec)
+        # Blank region clipping
+        if self.clipping is True:
+            spec, blank_row = self.blank_clipping(spec)
+        else: blank_row = self.target_size[0]
+
+        # Masking
+        if self.freq_mask != False or self.time_mask != False:
+            spec, label = self.masking(spec, label)
+
+        # 최종 Resizing
+        spec = self.resize_spectrogram(spec, self.target_size)
+        return spec, label, blank_row
+
     def get_mel_spectrogram(self):
         audio_list = []
-        self.iter_list = []
-        self.blank_row_list = []
-        self.padding_list = []
-
-        for path_wav in self.wavs:
-            path = os.path.join(self.path, path_wav)
-            # Torchaudio 이용하여 파일 로드
-            d, org_sr = torchaudio.load(path)
+        labels = []
+        for wav, tsv in zip(self.wavs, self.tsvs):
+            # Torchaudio 이용하여 wav파일 로드
+            path_wav = os.path.join(self.path, wav)
+            d, org_sr = torchaudio.load(path_wav)
             d = torchaudio.functional.resample(d, orig_freq=org_sr, new_freq=self.sample_rate)
+            # tsv파일 로드
+            path_tsv = os.path.join(self.path, tsv)
+            tsv_data = pd.read_csv(path_tsv, sep='\t', header=None)
 
             # 데이터 어그멘테이션
             if self.augmentation is True:
@@ -399,93 +492,42 @@ class CustomDataset(Dataset):
                 num_splits = math.ceil(x.shape[-1] / num_frames)  # 나눌 개수
                 # 오디오 파일이 num_splits * num_frames보다 짧을 경우
                 if x.shape[-1] < num_splits * num_frames:
-                    # Padding
-                    x = self.padding(x, num_splits * num_frames, self.padding_type)
-                else: self.padding_list.append(0)
-                # 오디오 파일이 num_frames보다 긴 경우
+                    # Zero padding
+                    if self.padding_type == 0:
+                        x = self.zero_padding(x, num_splits * num_frames, self.padding_type)
+                    # Another padding(1: copy & paste, 2: augmentation)
+                    else:
+                        x, tsv_data = self.another_padding(x, num_splits * num_frames,
+                                                           self.padding_type,
+                                                           tsv_data, num_splits)
+                # 오디오 파일이 num_frames보다 긴 경우 split
                 if x.shape[-1] > num_frames:
-                    self.iter_list.append(num_splits)
                     for i in range(num_splits):
+                        label = self.process_label(tsv_data, i)
+                        # label에 아무것도 들어있지 않다면
+                        if len(label) == 0:
+                            continue
+                        # 오디오 split
                         split = x[:, i * frame_offset:i * frame_offset + num_frames]
                         # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
-                        split = self.processing(split)
+                        split, label, blank_row = self.process_data(split, label)
+                        # 라벨에 blank_region clipping 적용
+                        label = [[x1, y1, x2, blank_row / self.target_size[0], cls] for x1, y1, x2, _, cls in label]
+                        labels.append(label)
                         audio_list.append(split)
                     # break
-                # 원본 wav의 길이가 num_frames보다 짧거나 같다면
+                # 원본 wav의 길이가 num_frames와 같다면(패딩을 했기에 짧을 수는 없음) split X
                 else:
-                    self.iter_list.append(1)
-                    # 멜스펙트로그램, 정규화, 채널 수 조정, 클리핑, 리사이징
-                    x = self.processing(x)
+                    label = self.process_label(tsv_data, i)
+                    # label에 아무것도 들어있지 않다면
+                    if len(label) == 0:
+                        continue
+                    x, label, blank_row = self.process_data(x, label)
+                    # 라벨에 blank_region clipping 적용
+                    label = [[x1, y1, x2, blank_row, cls] for x1, y1, x2, _, cls in label]
+                    labels.append(label)
                     audio_list.append(x)
                     # break
-        # print(len(audio_list), len(self.iter_list), len(self.blank_row_list), len(self.padding_list))
-        return torch.stack(audio_list)
-
-    def get_label(self):
-        labels = []
-        idx = 0
-        for i, path_tsv in enumerate(self.tsvs):
-            path = os.path.join(self.path, path_tsv)
-            orig_tsv_data = pd.read_csv(path, sep='\t', header=None)
-            # Augmentation을 사용한다면 4회 반복, 아니라면 1회
-            for j in range(4 if self.augmentation is True else 1):
-                # Augmentation 유무에 따라 사용할 _idx 변경
-                if self.augmentation is True:
-                    _idx = i * 4 + j
-                else:
-                    _idx = i
-                    tsv_data = orig_tsv_data.copy()
-                iter = self.iter_list[_idx]
-                # self.padding_type이 0이 아닌 경우(1, 2인 경우)
-                if self.padding_type != 0 and self.padding_list[_idx] != 0:
-                    # 패딩 위치(앞: 0, 뒤: 1), 패딩 길이(단위: 초)
-                    pad_info = self.padding_list[_idx]
-                    tsv_data = self.padded_df(orig_tsv_data, pad_info[0], pad_info[1], iter)
-                # 한 이미지당 split의 개수만큼 반복
-                for _iter in range(iter):
-                    label = []
-                    # blank clipping row 불러오기
-                    if self.clipping is True:
-                        blank_row = self.blank_row_list[sum(self.iter_list[:_idx]) + _iter]
-                    else:
-                        blank_row = self.target_size[0]
-                    for _, tsv_row in tsv_data.iterrows():
-                        # S1, S2에 속한다면
-                        if tsv_row[2] in [1, 3]:
-                            # 구간 불러와서 sr값 곱하고 hop_legth로 나누기
-                            tsv_row[0] = tsv_row[0] * self.sample_rate / self.hop_length - (_iter * self.th)
-                            tsv_row[1] = tsv_row[1] * self.sample_rate / self.hop_length - (_iter * self.th)
-                            tsv_row[2] = 1 if tsv_row[2] == 1 else 2    # S1=1, S2=2
-                            # 시작점 혹은 끝점이 구간 안에 존재한다면
-                            if (0 <= tsv_row[0] < self.th or \
-                                0 < tsv_row[1] <= self.th):
-                                # 시작점이 0보다 작은 경우 0으로
-                                if tsv_row[0] < 0:
-                                    tsv_row[0] = 0
-                                # 끝점이 구간보다 큰 경우 구간의 끝점으로
-                                if tsv_row[1] > self.th:
-                                    tsv_row[1] = self.th
-                                # 최종 resize한 값 으로 보간
-                                tsv_row[0] *= (self.target_size[1] - 1) / self.th
-                                tsv_row[1] *= (self.target_size[1] - 1) / self.th
-                                label.append([tsv_row[0] / self.target_size[1], 0 / self.target_size[0],
-                                    tsv_row[1] / self.target_size[1], blank_row / self.target_size[0],
-                                    int(tsv_row[2])])# xmin, ymin, xmax, ymax, cls
-                            # 시작점 혹은 끝점이 구간 안에 존재하지 않는다면
-                            else: continue
-                        # S1, S2에 속하면서 시작점 혹은 끝점이 구간 안에 존재하는 경우를 제외한 나머지 경우
-                        else: continue
-                    if(len(label)==0):
-                        self.delete_list.append(idx)
-                    idx += 1
-                    labels.append(label)
-            # break
+        # print(len(audio_list))
         # print(len(labels))
-        return labels
-
-    def delete_data(self):
-        delete_count=0
-        for i in self.delete_list:
-            del self.y[i-delete_count]
-            delete_count+=1
-        self.x = self.x[[i for i in range(self.x.size(0)) if i not in self.delete_list]]
+        return torch.stack(audio_list), labels
