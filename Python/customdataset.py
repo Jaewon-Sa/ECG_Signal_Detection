@@ -420,7 +420,6 @@ class CustomDataset(Dataset):
         # 행별로 black_percent 계산
         for row in range(img.shape[0] - 1, 0, -1):
             black_percent = len(np.where(img[row,:]==0)[0])/len(img[row,:])
-            print(black_percent)
             if black_percent < 0.80:
                 break
         # # clipping
