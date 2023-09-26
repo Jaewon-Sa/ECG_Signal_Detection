@@ -14,7 +14,12 @@ from defaultbox import default
 from Detect import Detect
 
 from matplotlib import pyplot as plt
+
+import librosa
+import librosa.display
+
 import time
+from matplotlib.patches import Rectangle
 
 def get_iou(a,b):
     if len(a)!=4 or len(b)!=4:
@@ -134,6 +139,118 @@ def get_ap(tp_n, fp_n, fn_n, detect_list):
     ap = sum(area) / 11 # len(recallRange)
     
     return ap
+
+def get_box(output):
+    all_boxes = [[[] for _ in range(output.size(0))]
+                 for _ in range(output.size(1))]  #all_boxes[cls][image]
+        
+        
+    for i in range(output.size(0)):
+        for j in range(1, output.size(1)):#class 종류
+            dets = output[i, j, :]
+            mask = dets[:, 0].gt(0.).expand(5, dets.size(0)).t()#confidence < 0
+            dets = torch.masked_select(dets, mask).view(-1, 5)
+            if dets.size(0) == 0: #감지된게 없으면
+                continue
+            boxes = dets[:, 1:]
+            scores = dets[:, 0].cpu().numpy()
+
+            cls_dets = np.hstack((boxes.cpu().numpy(),
+                                    scores[:, np.newaxis])).astype(np.float32,
+                                                                     copy=False)
+            all_boxes[j][i] = cls_dets
+            
+    return all_boxes
+
+def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
+    
+    d=default()
+    detect=Detect()#상위 n개에 대한 detection
+    tensor_d = d.forward()
+    tensor_d = tensor_d.to(device)  
+    model.to(device)
+    
+    w, h = image_size #임시
+    
+    ap = 0
+    total_Recall = 0
+    total_Precison = 0
+    N=0
+    for idx, data in enumerate(Data_loader):
+        if(idx==10): break
+        images = data[0].to(device)
+        labels = [label.cpu() for label in data[1]] # batch, 객체개수, 5
+        
+        images=images[1]
+        images=torch.unsqueeze(images, 0)
+        labels=[labels[1]]
+        
+        total_labels=0
+        for label in labels:
+            total_labels+=len(label)
+
+        with torch.no_grad():
+            cls, loc = model(images)
+            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, conf_thresh=0.4, nms_thresh=0.5)
+        all_boxes = get_box(output)
+        
+        
+        n_class =  output.size(1)
+        images = images.cpu()
+        for i, image in enumerate(images):
+            plt.figure(figsize=(20,20))
+            fig, ax = plt.subplots(figsize=(15, 15))
+            # 스펙트로그램 시각화
+            if image.shape[-1] == 3:
+                x = np.transpose(np.array(image), (1, 2, 0))
+                librosa.display.specshow(cv2.cvtColor(np.array(x), cv2.COLOR_BGR2RGB),
+                                         sr=4000,
+                                         hop_length=800,
+                                         n_fft=N_FFT,
+                                         win_length=WIN_LENGTH,
+                                         cmap='magma')
+            else:
+                librosa.display.specshow(np.array(image[0]),
+                                         sr=8000,
+                                         hop_length=800)
+
+            # 레이블 시각화
+            for label in labels[i]:
+                start, _, end, height, class_id= label
+                start *= 300    # 300 = output 이미지 가로 크기
+                end *= 300      # 300 = output 이미지 가로 크기
+                height *= 300   # 300 = output 이미지 세로 크기
+                color = 'red' if class_id == 1 else 'blue'
+                ax.add_patch(Rectangle((start, 0), (end - start), height,
+                                       edgecolor = color,
+                                       facecolor = 'white',
+                                       fill=True,
+                                       alpha=0.5,
+                                       lw=5))
+                
+            for cl in range(1,n_class):    
+                for cls_boxes in all_boxes[cl][i]:
+                    start_x, start_y, end_x, end_y = cls_boxes[:-1]
+                    
+                    start_x = np.clip(start_x*300, 0, 300)
+                    start_y = np.clip(start_y*300, 0, 300)
+                    end_x = np.clip(end_x*300, 0, 300)
+                    end_y = np.clip(end_y*300, 0, 300)
+                    
+                    color = 'orange' if cl == 1 else 'aqua'
+                    ax.add_patch(Rectangle((start_x, start_y), (end_x - start_x), (end_y - start_y),
+                                       edgecolor = color,
+                                       facecolor = 'white',
+                                       fill=True,
+                                       alpha=0.5,
+                                       lw=4))
+                
+                
+
+            plt.xlabel("Time")
+            plt.ylabel("Frequency")
+            plt.savefig(f"detection_result/origin_pred_{idx}_{i}.png")
+            
 def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
     
     d=default()
@@ -152,13 +269,20 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
         images = data[0].to(device)
         labels = [label.cpu() for label in data[1]] # batch, 객체개수, 5
         
+        #print(labels[1])
+        #images=images[1]
+        #images=torch.unsqueeze(images, 0)
+        #labels=[labels[1]]
         total_labels=0
         for label in labels:
             total_labels+=len(label)
 
         with torch.no_grad():
             cls, loc = model(images)
-            
+            #sorted_tensor, indices = torch.sort(cls[:,:,1], dim=-1, descending=True)
+            #print(sorted_tensor[:10])
+            #sorted_tensor, indices = torch.sort(cls[:,:,2], dim=-1, descending=True)
+            #print(sorted_tensor[:10])
             ''' 
             #For Debug
             cls = (batch,ddobx,3)
@@ -169,26 +293,12 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
             상위 200개에 대한 detection
             size=(batch, numclass ,200, 5)
             '''
-            
 
             output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, conf_thresh=0.4, nms_thresh=0.5)
-        all_boxes = [[[] for _ in range(output.size(0))]
-                 for _ in range(output.size(1))]  #all_boxes[cls][image]
-
-        for i in range(output.size(0)):
-            for j in range(1, output.size(1)):#class 종류
-                dets = output[i, j, :]
-                mask = dets[:, 0].gt(0.).expand(5, dets.size(0)).t()#confidence < 0
-                dets = torch.masked_select(dets, mask).view(-1, 5)
-                if dets.size(0) == 0: #감지된게 없으면
-                    continue
-                boxes = dets[:, 1:]
-                scores = dets[:, 0].cpu().numpy()
-
-                cls_dets = np.hstack((boxes.cpu().numpy(),
-                                      scores[:, np.newaxis])).astype(np.float32,
-                                                                     copy=False)
-                all_boxes[j][i] = cls_dets
+            ob=output[0,:,:10]
+            #print(ob.size())
+            #print(ob)
+        all_boxes = get_box(output)
 
         TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = 0.5)
         
@@ -205,7 +315,7 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                     
                 if state=="TP":
                     total_TP_1+=1
-                    
+ 
         TPFP_cls_filter=[[] for _ in range(output.size(1))] #n_class AP 계산용
         TPFP_filter=[] # total AP 계산용
         for cls_idx, cls_TPFP in enumerate(TPFP):
@@ -234,7 +344,10 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
         #print(total_TP_1,total_TP_2)
         #print(total_FP,total_FN)
         
-        Precison = total_TP_1 / (total_TP_1 + total_FP) 
+        if total_TP_1 + total_FP == 0:
+            continue
+        else :
+            Precison = total_TP_1 / (total_TP_1 + total_FP) 
         Recall = total_TP_1 / (total_TP_1 + total_FN) #total_labels
         total_Recall += Recall
         total_Precison += Precison
@@ -245,5 +358,6 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
     total_Recall /= N
     total_Precison /= N
     mAP = ap / N
+    print(f"{N}/{len(Data_loader)}")
     return total_Recall, total_Precison, mAP
 
