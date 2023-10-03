@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
-
-
 import torch
 from torch import nn
 from torchvision import models
@@ -13,14 +7,12 @@ class SSD(nn.Module):
         
         super().__init__()
         
-        self.input_layer = nn.Conv2d(1, 16, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
-        
         self.n_class = n_class
         self.default_box_n = default_box_n
         self.state = state
         
         self.softmax = nn.Softmax(dim=-1)
-            
+        #self.dropout = nn.Dropout(p=0.2)
         #가중치 초기화 인자
         self.rescale_factors = nn.Parameter(torch.FloatTensor(1, 112, 1, 1))  # there are 512 channels in conv4_3_feats
         nn.init.constant_(self.rescale_factors, 20)
@@ -34,10 +26,10 @@ class SSD(nn.Module):
         self.backbone = backbone
         
         #extra layer
-        self.extra_layer_1 = self.extra_layers(960,512,4)
-        self.extra_layer_2 = self.extra_layers(512,256,4)
-        self.extra_layer_3 = self.extra_layers(256,256,2)
-        self.extra_layer_4 = self.extra_layers(256,128,2)
+        self.extra_layer_1 = self.get_extra_layers(960,512,4)
+        self.extra_layer_2 = self.get_extra_layers(512,256,4)
+        self.extra_layer_3 = self.get_extra_layers(256,256,2)
+        self.extra_layer_4 = self.get_extra_layers(256,128,2)
         
         self.extra_layers = [self.extra_layer_1, 
                             self.extra_layer_2, 
@@ -73,7 +65,7 @@ class SSD(nn.Module):
         #모델학습이 순조롭지않다면 향후 추가 예정
         return
     
-    def extra_layers(self, input_size, output_size, div):
+    def get_extra_layers(self, input_size, output_size, div):
         layer = nn.Sequential(
             #conv2D 해상도낮추기
             nn.Conv2d(input_size, output_size, kernel_size=(1, 1), stride=(1, 1), bias=False),
@@ -96,8 +88,8 @@ class SSD(nn.Module):
             #Point-wise
             nn.Conv2d(output_size, output_size, kernel_size=(1, 1), stride=(1, 1)),
             nn.Hardswish(),
-            nn.Identity()
-            
+            nn.Identity(),
+            #nn.Dropout(p=0.3)
         ) 
         return layer
     
@@ -119,6 +111,7 @@ class SSD(nn.Module):
                 continue
                 
             x = layer(x)
+            #x = self.dropout(x)
             #print("size : {0}, number = {1}".format(x.size(), n))
             if n==16:
                 f_maps.append(x) 
@@ -161,7 +154,7 @@ class SSD(nn.Module):
 # In[1]:
 
 
-def build_model(inference_type, input_channels=1, is_freeze=True):
+def build_model_SSD(inference_type, input_channels=1, is_freeze=True):
 
     backbone = models.mobilenet_v3_large(pretrained=True)
     if is_freeze:

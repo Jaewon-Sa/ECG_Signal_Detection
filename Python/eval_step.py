@@ -21,6 +21,7 @@ import librosa.display
 import time
 from matplotlib.patches import Rectangle
 
+DIR_PATH="./detection_result"
 def get_iou(a,b):
     if len(a)!=4 or len(b)!=4:
         return 0
@@ -47,7 +48,7 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
     '''
     det_bbox 
     type:list
-    (cls, batch) data= numpy(검출한 객체개수, 5) xmin, ymin, xmax, ymax, cls(confidence)
+    (cls, batch,data) data= numpy(검출한 객체개수, 5) xmin, ymin, xmax, ymax, cls(confidence)
     
     target_bbox
     type : list
@@ -55,7 +56,7 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
     정규화 되어있음
     '''
     # confidence type iou index
-    TPFN=[[[-1, "FN", -1, -1] for _ in t_bboxes] for t_bboxes in target_bboxes]  #tp, fn 저장용 실측 기준
+    TPFN=[[[-1, "FN", -1, -1, t[-1]] for t in t_bboxes] for t_bboxes in target_bboxes]  #tp, fn 저장용 실측 기준
     TPFP=[[[[b_cls_bbox[-1], "FP", -1] for b_cls_bbox in b_cls_bboxes] for b_cls_bboxes in cls_bboxes] for cls_bboxes in det_bboxes]  #tp, fp 저장용 예측 기준
 
     for i in range(batch):
@@ -73,19 +74,19 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
                         '''
                         iou = get_iou(d_bbox[:-1],t_bbox[:-1])
                         
-                        if TPFP[cl][i][d_i][1] == 'TP' and TPFP[cl][i][d_i][-1] != t_i: # 탐색과정에서 dbox가 다른 gt에 tp 일 경우
+                        if TPFP[cl][i][d_i][1] == 'TP' and TPFP[cl][i][d_i][-2] != t_i: # 탐색과정에서 dbox가 다른 gt에 tp 일 경우
                             continue
  
                         if iou >= iou_threshold:
                             if TPFN[i][t_i][1]=='TP' and iou > TPFN[i][t_i][2]: # 가장 높은 iou를 가진 값을 채택
-                                past_d_i =  TPFN[i][t_i][-1]
-                                TPFN[i][t_i] = [d_bbox[-1], "TP", iou, d_i]
-                                TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i]
-                                TPFP[cl][i][past_d_i][1] = "FP"
-                                
+                                    past_d_i =  TPFN[i][t_i][-1]
+                                    TPFN[i][t_i] = [d_bbox[-1], "TP", iou, d_i, cl]
+                                    TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i, cl]
+                                    TPFP[cl][i][past_d_i][1] = "FP"
+
                             elif TPFN[i][t_i][1]=='FN':
-                                TPFN[i][t_i] = [d_bbox[-1],"TP", iou, d_i]
-                                TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i]                            
+                                TPFN[i][t_i] = [d_bbox[-1],"TP", iou, d_i, cl]
+                                TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i, cl]                            
                 else:
                     continue
             
@@ -164,6 +165,12 @@ def get_box(output):
 
 def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
     
+    if not os.path.exists(DIR_PATH):
+        os.makedirs(DIR_PATH)
+        print(f"make '{DIR_PATH}' DIR path")
+    else:
+        print(f"Already '{DIR_PATH}' DIR path")
+    
     d=default()
     detect=Detect()#상위 n개에 대한 detection
     tensor_d = d.forward()
@@ -181,9 +188,9 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
         images = data[0].to(device)
         labels = [label.cpu() for label in data[1]] # batch, 객체개수, 5
         
-        images=images[1]
-        images=torch.unsqueeze(images, 0)
-        labels=[labels[1]]
+        #images=images[1]
+        #images=torch.unsqueeze(images, 0)
+        #labels=[labels[1]]
         
         total_labels=0
         for label in labels:
@@ -251,8 +258,8 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
             plt.ylabel("Frequency")
             plt.savefig(f"detection_result/origin_pred_{idx}_{i}.png")
             
-def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
-    
+def test_step(model, Data_loader, image_size=(300,300), device="cpu", _conf_thresh = 0.4, _nms_thresh = 0.5, _iou_threshold = 0.5):
+
     d=default()
     detect=Detect()#상위 n개에 대한 detection
     tensor_d = d.forward()
@@ -264,6 +271,9 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
     ap = 0
     total_Recall = 0
     total_Precison = 0
+    
+    S1_Recall, S1_Precison, S2_Recall, S2_Precison = [], [], [], []
+    
     N=0
     for idx, data in enumerate(Data_loader):
         images = data[0].to(device)
@@ -294,30 +304,37 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
             size=(batch, numclass ,200, 5)
             '''
 
-            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, conf_thresh=0.4, nms_thresh=0.5)
+            output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, 
+                                    conf_thresh = _conf_thresh, nms_thresh = _nms_thresh)
             ob=output[0,:,:10]
             #print(ob.size())
             #print(ob)
         all_boxes = get_box(output)
 
-        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = 0.5)
+        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = _iou_threshold)
         
-        total_TP_1 = 0
-        total_TP_2 = 0 #검수용
-        total_FN = 0
-        total_FP = 0
+        TP_list   = [0,0,0] #total, s1, s2
+        TP_list_2 = [0,0,0] #검수용
+        
+        FN_list = [0,0,0]
+        FP_list = [0,0,0]
         
         for batch_TPFN in TPFN:
             for real_det in batch_TPFN:
                 con, state = real_det[:2]
+                _class = int(real_det[-1])
                 if state=="FN":
-                    total_FN+=1
+                    FN_list[_class]+=1
                     
                 if state=="TP":
-                    total_TP_1+=1
- 
+                    TP_list[_class]+=1
+                    
+        TP_list[0] = TP_list[1] + TP_list[2]
+        FN_list[0] = FN_list[1] + FN_list[2]
+        
         TPFP_cls_filter=[[] for _ in range(output.size(1))] #n_class AP 계산용
         TPFP_filter=[] # total AP 계산용
+        
         for cls_idx, cls_TPFP in enumerate(TPFP):
             if cls_idx == 0:
                 continue
@@ -329,35 +346,51 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu"):
                     con, state = pred_det[:2]
                     
                     if state=="FP":
-                        total_FP+=1
+                        FP_list[cls_idx]+=1
                     
                     if state=="TP":
-                        total_TP_2+=1
+                        TP_list_2[cls_idx]+=1
                         
                     TPFP_cls_list.append(pred_det[:2])
                     TPFP_filter.append(pred_det[:2])
                     
             TPFP_cls_filter[cls_idx] = TPFP_cls_list
-
-        #print(TPFP)
-        #print(TPFN)
-        #print(total_TP_1,total_TP_2)
-        #print(total_FP,total_FN)
         
-        if total_TP_1 + total_FP == 0:
+        TP_list_2[0] = TP_list_2[1] + TP_list_2[2] 
+        FP_list[0] = FP_list[1] + FP_list[2]
+        
+        if TP_list[0] + FP_list[0] == 0:
             continue
         else :
-            Precison = total_TP_1 / (total_TP_1 + total_FP) 
-        Recall = total_TP_1 / (total_TP_1 + total_FN) #total_labels
+            Precison = TP_list[0] / (TP_list[0] + FP_list[0]) 
+        Recall = TP_list[0] / (TP_list[0] + FN_list[0]) #total_labels
+        
         total_Recall += Recall
         total_Precison += Precison
-
-        ap +=  get_ap(total_TP_1, total_FP, total_FN, TPFP_filter)
+        
+        if TP_list[1] + FN_list[1] != 0:
+            S1_Recall.append(TP_list[1] / (TP_list[1] + FN_list[1]))
+        if TP_list[2] + FN_list[2] != 0:
+            S2_Recall.append(TP_list[2] / (TP_list[2] + FN_list[2]))
+        
+        if TP_list[1] + FP_list[1] != 0:
+            S1_Precison.append(TP_list[1] / (TP_list[1] + FP_list[1])) 
+        if TP_list[2] + FP_list[2] != 0:
+            S2_Precison.append(TP_list[2] / (TP_list[2] + FP_list[2])) 
+        
+        ap +=  get_ap(TP_list[0], FP_list[0], FN_list[0], TPFP_filter)
         N = idx+1
         
     total_Recall /= N
     total_Precison /= N
+    
+    S1_Recall   = float(sum(S1_Recall)/len(S1_Recall)) if len(S1_Recall) != 0 else 0
+    S2_Recall   = float(sum(S2_Recall)/len(S2_Recall)) if len(S2_Recall) != 0 else 0
+    S1_Precison = float(sum(S1_Precison)/len(S1_Precison)) if len(S1_Precison) != 0 else 0
+    S2_Precison = float(sum(S2_Precison)/len(S2_Precison)) if len(S2_Precison) != 0 else 0
+    
     mAP = ap / N
+    
     print(f"{N}/{len(Data_loader)}")
-    return total_Recall, total_Precison, mAP
+    return (total_Recall, S1_Recall, S2_Recall,total_Precison, S2_Recall, S2_Precison, mAP)
 

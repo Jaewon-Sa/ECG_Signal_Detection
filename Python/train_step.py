@@ -15,6 +15,7 @@ DIR_PATH = "./objectdetection_model"
 
 import math
 from torch.optim.lr_scheduler import _LRScheduler
+import wandb
 
 #
 class CosineAnnealingWarmUpRestarts(_LRScheduler):
@@ -73,10 +74,25 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
             param_group['lr'] = lr
 
             
-def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_num, batchsize, 
-               optim_type="SGD", lr=2e-3, device="cpu", model_name="BASE", 
-               is_wandb=False, is_freeze=True):
+def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, is_wandb = False, device="cpu"):
     
+    epoch_num =  param["epoch_num"]
+    batchsize = param["batch_size"]
+    optim_type = param["optim_type"]
+    model_name = param["MODEL_NAME"]
+    is_freeze = param["is_freeze"]
+    max_lr = param["max_lr"]
+    min_lr = param["min_lr"]
+    
+    sr = param["SR"]
+    wl = param["WL"]
+    nfft = param["n_FFT"]
+    nMel = param["n_MELS"]
+    multi_channels = param["multi_channels"]
+    padding_type = param["padding_type"]
+    th = param["th"]
+    
+    max_mAP = 0
     if not os.path.exists(DIR_PATH):
         os.makedirs(DIR_PATH)
         print(f"make '{DIR_PATH}' DIR path")
@@ -89,24 +105,19 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_nu
             project="Heart_Signal_Detection",
 
             # track hyperparameters and run metadata
-            config={
-            "learning_rate": lr,
-            "architecture": "Mobilenet_v3 + SSD",
-            "dataset": "circor-heart-sound",
-            "epochs": epoch_num,
-            "batch" : batchsize 
-            }
+            config = param
         )
         
+        wandb.define_metric("mAP", summary="max")
+
     d=default()
     tensor_d = d.forward()
     
     if optim_type =="SGD":
-        optimizer = optim.SGD(model.parameters(), lr=1e-4)
+        optimizer = optim.SGD(model.parameters(), lr = min_lr)
     elif optim_type == "Adam":
-        optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=2, eta_max=lr,  T_up=3, gamma=0.5)
+        optimizer = optim.Adam(model.parameters(), lr = min_lr)
+        scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=2, eta_max = max_lr,  T_up=3, gamma=0.5)
     
     loss_func = MultiBoxLoss(device=device)
     
@@ -118,6 +129,7 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_nu
         iter_start = time.time()
         print("Epoch : {0} / {1}".format(epoch+1,epoch_num))
         
+        loss_l,loss_c,loss = 0,0,0
         #targets=np.array([[[1,2,3,4,5],[1,2,3,4,5]],[[1,2,3,4,5],[1,2,3,4,5]]])
         total_batch_size = len(train_Data_loader)
         for idx, data in enumerate(train_Data_loader):
@@ -141,26 +153,28 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_nu
                         
                 
                 optimizer.step() # 파라미터 갱신
-            if(idx % 50 == 0):
+            if(idx % 100 == 0):
                 iter_end = time.time()
                 
                 print(f'Current Batch {idx} / {total_batch_size} '
                       f'learning rate : {scheduler.get_lr()} | Cls Loss : {loss_l.item():.3f},'
                       f'Loc Loss : {loss_c.item():.3f}, Total Loss : {loss.item():.3f} |'
                       f'50 iter time {iter_end - iter_start:.4f}: ')
-                
-                if is_wandb==True:
-                    wandb.log({"total_loss": loss.item(),
-                               "Cls_loss": loss_c.item(),
-                               "Loc_loss": loss_l.item()})
-                
+              
                 iter_start =time.time()
                 
             epoch_train_loss+=loss.item()
             
         epoch_end = time.time() 
         scheduler.step()
-        if (epoch + 1) % 3 == 0 and  (epoch + 1) >= 15:
+        
+        if is_wandb==True:
+            wandb.log({"total_loss": loss.item(),
+                       "Cls_loss": loss_c.item(),
+                       "Loc_loss": loss_l.item(),
+                       "learning rate" : scheduler.get_lr()[0]}, step=epoch)
+                
+        if (epoch + 1) % 2 == 0 and  (epoch + 1) >= 10:
             train_parameters = model.state_dict()
             test_model.load_state_dict(train_parameters)
             test_model.eval()
@@ -168,13 +182,27 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_nu
             torch.cuda.empty_cache()
             
             eval_start = time.time()
-            mRecall, mPrecison, mAP = test_step(test_model, valid_Data_loader, device = device)
+            mRecall, mS1_Recall, mS2_Recall, mPrecison, mS1_Precison, mS2_Precison, mAP = test_step(test_model, valid_Data_loader, device = device)
 
             eval_end = time.time()
             print((f'Epoch : {epoch+1} / {epoch_num} | Total Loss : {epoch_train_loss:.3f}' 
                    f'| 1 epoch update time : {epoch_end-epoch_start:.2f}s | learning rate : {scheduler.get_lr()} |' 
                    f'mRecall : {mRecall:.2%} , mPrecison : {mPrecison:.2%}, mAP: {mAP:.3f}, eval_time : {eval_end - eval_start:.2f}s'))
             torch.cuda.empty_cache()
+            if is_wandb==True:
+                wandb.log({"mRecall"   : mRecall,
+                          "mPrecison"  : mPrecison,
+                          "S1_Recall"  : mS1_Recall,
+                          "S2_Recall"  : mS2_Recall,
+                          "S1_Precison": mS1_Precison,
+                          "S2_Precison": mS2_Precison,
+                          "mAP": mAP}, step = epoch)
+            if max_mAP < mAP:
+                max_mAP = mAP
+                torch.save(model.state_dict(), 
+                           f"{DIR_PATH}/sr{sr}_nFFT{nfft}_WL{wl}_nMel{nMel}"
+                           f"multi_channels{multi_channels}_padding_type{padding_type}_th{th}"
+                           f"_{model_name}_weight_batch{batchsize}_mAP{mAP:.3f}.pth")
             
         else:
             print("Epoch : {0} / {1} of Total Loss : Total Loss : {2:.3f} | 1 epoch update time : {3:.2f}s"
@@ -182,10 +210,7 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, epoch_nu
         print("-----------------------------------------------")
         epoch_train_loss=0
         
-        torch.save(model, 
-                f"{DIR_PATH}/{model_name}_{epoch+1}_{batchsize}_{optim_type}_{is_freeze}.pth")
-        torch.save(model.state_dict(), 
-                f"{DIR_PATH}/{model_name}_weight_{epoch+1}_{batchsize}_{optim_type}_{is_freeze}.pth")
+
     if is_wandb==True:
         wandb.finish()
 
