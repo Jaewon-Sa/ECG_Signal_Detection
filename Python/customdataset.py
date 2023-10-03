@@ -222,7 +222,7 @@ class CustomDataset(Dataset):
         # S1, S2에 속하는 라벨의 제일 처음 시작점과 제일 마지막 끝점 탐색
         start_min = min([row[0] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
         end_max = max([row[1] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
-        # 0.5초 단위로 시작점 반내림, 끝점 반올림
+        # 0.01초 단위로 시작점 반내림, 끝점 반올림
         new_start, new_end = self.custom_round(start_min, end_max)
 
         # 라벨을 new_start를 기준으로 재설정
@@ -237,12 +237,12 @@ class CustomDataset(Dataset):
 
     def custom_round(self, start, end):
         for i in (start, end):
-            int_part = int(i * 10)
-            decimal_part = i * 10 - int_part
+            int_part = int(i * 100)
+            decimal_part = i * 100 - int_part
             if i == start:
-                start_result = int_part / 10
+                start_result = int_part / 100
             else:
-                end_result = int_part / 10 + 0.1
+                end_result = int_part / 100 + 0.01
         return start_result, end_result
 
     def apply_filter(self, audio):
