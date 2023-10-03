@@ -575,7 +575,7 @@ class CustomDataset(Dataset):
                     label = [[x1, y1, x2, blank_row / self.target_size[0], cls] for x1, y1, x2, _, cls in label]
                     labels.append(label)
                     audio_list.append(x)
-            break   # 한 개의 데이터만 테스트할 때 활성화
+            # break   # 한 개의 데이터만 테스트할 때 활성화
         print("data: ", len(audio_list))
         print("label: ", len(labels))
         return torch.stack(audio_list), labels
