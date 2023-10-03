@@ -160,6 +160,7 @@ class CustomDataset(Dataset):
                  n_mels=128,
                  n_fft=1024,
                  win_length=800,
+                 delete_label=False,
                  augmentation=False,
                  filter_params=False,
                  padding_type=0,
@@ -178,6 +179,7 @@ class CustomDataset(Dataset):
         self.n_fft = n_fft
         self.win_length = win_length
 
+        self.delete_label = delete_label
         self.augmentation = augmentation
         self.filter_params = filter_params
         self.padding_type = padding_type
@@ -215,6 +217,33 @@ class CustomDataset(Dataset):
         # self.heas.sort()
         self.wavs.sort()
         self.tsvs.sort()
+
+    def zero_label_cutting(self, _d, _tsv_data):
+        # S1, S2에 속하는 라벨의 제일 처음 시작점과 제일 마지막 끝점 탐색
+        start_min = min([row[0] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
+        end_max = max([row[1] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
+        # 0.5초 단위로 시작점 반내림, 끝점 반올림
+        new_start, new_end = self.custom_round(start_min, end_max)
+
+        # 라벨을 new_start를 기준으로 재설정
+        for index, row in _tsv_data.iterrows():
+            if row[2] in [1, 2, 3, 4]:
+                _tsv_data.at[index, 0] -= new_start
+                _tsv_data.at[index, 1] -= new_start
+
+        # 데이터를 new_start ~ new_end로 cut
+        _d = _d[:, int(new_start * self.sample_rate):int(new_end * self.sample_rate)]
+        return _d, _tsv_data
+
+    def custom_round(self, start, end):
+        for i in (start, end):
+            int_part = int(i * 10)
+            decimal_part = i * 10 - int_part
+            if i == start:
+                start_result = int_part / 10
+            else:
+                end_result = int_part / 10 + 0.1
+        return start_result, end_result
 
     def apply_filter(self, audio):
         for filter_param in self.filter_params:
@@ -262,20 +291,52 @@ class CustomDataset(Dataset):
         # 원본에 어그멘테이션 적용
         else:
             aug = self.gen_augmented(spec, padding_mode=True)
+
+        iter = 1
+        if aug.shape[-1] < pad_width:
+            iter = math.ceil(pad_width / aug.shape[-1])
+            for i in range(iter):
+                aug = torch.cat([aug, aug], dim=-1)
+            # print(iter)
+            # print(spec.shape)
+            # print(aug.shape)
+            # print(spec.shape[-1] / self.sample_rate) # 원본 몇초인지
+
         # 뒷부분에 padding
         if prob < 0.5:
             padded_spec[:, padded_spec.shape[-1] - pad_width:] = aug[:, :pad_width]
-            padded_rows[0] += (original_size - pad_width_df)
-            padded_rows[1] += (original_size - pad_width_df)
-            result_df = pd.concat([df, padded_rows], axis=0)
+            if iter == 1:
+                padded_rows[0] += (original_size - pad_width_df)
+                padded_rows[1] += (original_size - pad_width_df)
+                result_df = pd.concat([df, padded_rows], axis=0)
+            else:
+                result_df = df.copy()
+                for i in range(iter):
+                    padded_rows[0] += spec.shape[-1] / self.sample_rate
+                    padded_rows[1] += spec.shape[-1] / self.sample_rate
+                    result_df = pd.concat([result_df, padded_rows], axis=0)
+                result_df = result_df[result_df[0] < original_size]
         # 앞부분에 padding
         else:
             padded_spec[:, :pad_width] = aug[:, :pad_width]
-            top_rows = copied_rows[(copied_rows[0] >= 0) & (copied_rows[0] < pad_width_df)].copy()
-            top_rows[1] = top_rows[1].clip(0, pad_width_df)
-            padded_rows[0] += pad_width_df
-            padded_rows[1] += pad_width_df
-            result_df = pd.concat([top_rows, padded_rows], axis=0)
+            if iter == 1:
+                top_rows = copied_rows[(copied_rows[0] >= 0) & (copied_rows[0] < pad_width_df)].copy()
+                top_rows[1] = top_rows[1].clip(0, pad_width_df)
+                padded_rows[0] += pad_width_df
+                padded_rows[1] += pad_width_df
+                result_df = pd.concat([top_rows, padded_rows], axis=0)
+            else:
+                pass
+                result_df = df.copy()
+                for i in range(iter):
+                    padded_rows[0] += spec.shape[-1] / self.sample_rate
+                    padded_rows[1] += spec.shape[-1] / self.sample_rate
+                    padded_rows[1] = padded_rows[1].clip(0, pad_width_df)
+                    result_df = pd.concat([result_df, padded_rows], axis=0)
+                result_df = result_df[result_df[0] < pad_width_df]
+                df[0] += pad_width_df
+                df[1] += pad_width_df
+                result_df = pd.concat([result_df, df])
         return padded_spec, result_df
 
     def gen_augmented(self, spec, padding_mode):
@@ -297,25 +358,6 @@ class CustomDataset(Dataset):
                 augmented_data = torch.from_numpy(np.array(augmented_data))
                 augmented_data_list.append(augmented_data)
             return augmented_data_list
-
-    def padded_df(self, df, pad_position, pad_width, _iter):
-        copied_rows = df.iloc[0:, :]
-        padded_rows = copied_rows.copy()
-        original_size = self.th / (self.sample_rate / self.hop_length) * _iter
-        # print(original_size, _iter, pad_width)
-        # 패딩 위치가 뒤
-        if pad_position < 0.5:
-            padded_rows[0] += (original_size - pad_width)
-            padded_rows[1] += (original_size - pad_width)
-            result_df = pd.concat([df, padded_rows], axis=0)
-        # 패딩 위치가 앞
-        else:
-            top_rows = copied_rows[(copied_rows[0] >= 0) & (copied_rows[0] < pad_width)].copy()
-            top_rows[1] = top_rows[1].clip(0, pad_width)
-            padded_rows[0] += pad_width
-            padded_rows[1] += pad_width
-            result_df = pd.concat([top_rows, padded_rows], axis=0)
-        return result_df
 
     def process_label(self, tsv_data, _iter):
         label = []
@@ -437,10 +479,10 @@ class CustomDataset(Dataset):
     def process_data(self, spec, label):
         # 멜스펙트로그램 변환
         spec = ta_transforms.MelSpectrogram(sample_rate=self.sample_rate,
-                                        n_fft=self.n_fft,
-                                        win_length=self.win_length,
-                                        n_mels=self.n_mels,
-                                        hop_length=self.hop_length)(spec)
+                                            n_fft=self.n_fft,
+                                            win_length=self.win_length,
+                                            n_mels=self.n_mels,
+                                            hop_length=self.hop_length)(spec)
 
         spec = torchaudio.functional.amplitude_to_DB(spec, multiplier=10.,
                                         amin=1e-10,
@@ -455,7 +497,7 @@ class CustomDataset(Dataset):
         # Blank region clipping
         if self.clipping is True:
             spec, blank_row = self.blank_clipping(spec)
-        else: blank_row = self.target_size[0]
+        else: blank_row = 1
 
         # Masking
         if self.freq_mask != False or self.time_mask != False:
@@ -476,6 +518,14 @@ class CustomDataset(Dataset):
             # tsv파일 로드
             path_tsv = os.path.join(self.path, tsv)
             tsv_data = pd.read_csv(path_tsv, sep='\t', header=None)
+
+            if self.delete_label is True:
+                # 라벨이 0인 부분만 cut
+                try:
+                    d, tsv_data = self.zero_label_cutting(d, tsv_data)
+                # 클래스 0의 라벨만 있는 경우
+                except:
+                    continue
 
             # 데이터 어그멘테이션
             if self.augmentation is True:
@@ -514,19 +564,18 @@ class CustomDataset(Dataset):
                         label = [[x1, y1, x2, blank_row / self.target_size[0], cls] for x1, y1, x2, _, cls in label]
                         labels.append(label)
                         audio_list.append(split)
-                    # break
                 # 원본 wav의 길이가 num_frames와 같다면(패딩을 했기에 짧을 수는 없음) split X
                 else:
-                    label = self.process_label(tsv_data, i)
+                    label = self.process_label(tsv_data, 0)
                     # label에 아무것도 들어있지 않다면
                     if len(label) == 0:
                         continue
                     x, label, blank_row = self.process_data(x, label)
                     # 라벨에 blank_region clipping 적용
-                    label = [[x1, y1, x2, blank_row, cls] for x1, y1, x2, _, cls in label]
+                    label = [[x1, y1, x2, blank_row / self.target_size[0], cls] for x1, y1, x2, _, cls in label]
                     labels.append(label)
                     audio_list.append(x)
-                    # break
-        # print(len(audio_list))
-        # print(len(labels))
+            # break   # 한 개의 데이터만 테스트할 때 활성화
+        print("data: ", len(audio_list))
+        print("label: ", len(labels))
         return torch.stack(audio_list), labels
