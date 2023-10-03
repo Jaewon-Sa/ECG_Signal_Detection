@@ -222,8 +222,10 @@ class CustomDataset(Dataset):
         # S1, S2에 속하는 라벨의 제일 처음 시작점과 제일 마지막 끝점 탐색
         start_min = min([row[0] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
         end_max = max([row[1] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
-        # 0.5초 단위로 시작점 반내림, 끝점 반올림
+        # 0.01초 단위로 시작점 반내림, 끝점 반올림
+        print(start_min, end_max)
         new_start, new_end = self.custom_round(start_min, end_max)
+        print(new_start, new_end)
 
         # 라벨을 new_start를 기준으로 재설정
         for index, row in _tsv_data.iterrows():
@@ -237,12 +239,12 @@ class CustomDataset(Dataset):
 
     def custom_round(self, start, end):
         for i in (start, end):
-            int_part = int(i * 10)
-            decimal_part = i * 10 - int_part
+            int_part = int(i * 100)
+            decimal_part = i * 100 - int_part
             if i == start:
-                start_result = int_part / 10
+                start_result = int_part / 100
             else:
-                end_result = int_part / 10 + 0.1
+                end_result = int_part / 100 + 0.01
         return start_result, end_result
 
     def apply_filter(self, audio):
@@ -575,7 +577,7 @@ class CustomDataset(Dataset):
                     label = [[x1, y1, x2, blank_row / self.target_size[0], cls] for x1, y1, x2, _, cls in label]
                     labels.append(label)
                     audio_list.append(x)
-            # break   # 한 개의 데이터만 테스트할 때 활성화
+            break   # 한 개의 데이터만 테스트할 때 활성화
         print("data: ", len(audio_list))
         print("label: ", len(labels))
         return torch.stack(audio_list), labels
