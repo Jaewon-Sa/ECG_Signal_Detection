@@ -223,9 +223,7 @@ class CustomDataset(Dataset):
         start_min = min([row[0] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
         end_max = max([row[1] for _, row in _tsv_data.iterrows() if row[2] in [1, 2, 3, 4]])
         # 0.01초 단위로 시작점 반내림, 끝점 반올림
-        print(start_min, end_max)
         new_start, new_end = self.custom_round(start_min, end_max)
-        print(new_start, new_end)
 
         # 라벨을 new_start를 기준으로 재설정
         for index, row in _tsv_data.iterrows():
