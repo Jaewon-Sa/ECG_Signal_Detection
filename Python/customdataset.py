@@ -497,7 +497,7 @@ class CustomDataset(Dataset):
         # Blank region clipping
         if self.clipping is True:
             spec, blank_row = self.blank_clipping(spec)
-        else: blank_row = 1
+        else: blank_row = self.target_size[0]
 
         # Masking
         if self.freq_mask != False or self.time_mask != False:
