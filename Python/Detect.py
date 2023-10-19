@@ -1,29 +1,11 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
 
 import torch
 from utils import *
 
 class Detect:
-    """At test time, Detect is the final layer of SSD.  Decode location preds,
-    apply non-maximum suppression to location predictions based on conf
-    scores and threshold to a top_k number of output predictions for both
-    confidence score and locations.
-    """
-        
+
     def forward(self, loc_data, conf_data, prior_data, num_classes, bkg_label=0, top_k=30, conf_thresh=0.4, nms_thresh=0.5):
-        """
-        Args:
-            loc_data: (tensor) Loc preds from loc layers
-                Shape: [batch,num_priors*4]
-            conf_data: (tensor) Shape: Conf preds from conf layers
-                Shape: [batch*num_priors,num_classes]
-            prior_data: (tensor) Prior boxes and variances from priorbox layers
-                Shape: [1,num_priors,4]
-        """
+
         self.num_classes = num_classes
         self.background_label = bkg_label
         self.top_k = top_k
@@ -64,8 +46,6 @@ class Detect:
         flt[(rank < self.top_k).unsqueeze(-1).expand_as(flt)].fill_(0)
         return output
 
-
-# In[ ]:
 
 
 
