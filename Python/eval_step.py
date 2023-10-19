@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
-
 
 import os
 import time
@@ -79,7 +74,7 @@ def get_correct_ration(det_bboxes, target_bboxes, batch, n_class, iou_threshold 
  
                         if iou >= iou_threshold:
                             if TPFN[i][t_i][1]=='TP' and iou > TPFN[i][t_i][2]: # 가장 높은 iou를 가진 값을 채택
-                                    past_d_i =  TPFN[i][t_i][-1]
+                                    past_d_i =  TPFN[i][t_i][-2]
                                     TPFN[i][t_i] = [d_bbox[-1], "TP", iou, d_i, cl]
                                     TPFP[cl][i][d_i] = [d_bbox[-1], "TP", iou, t_i, cl]
                                     TPFP[cl][i][past_d_i][1] = "FP"
@@ -163,7 +158,7 @@ def get_box(output):
             
     return all_boxes
 
-def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
+def visualization_step(model, Data_loader, tensor_d, image_size=(300,300), device="cpu"):
     
     if not os.path.exists(DIR_PATH):
         os.makedirs(DIR_PATH)
@@ -171,9 +166,7 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
     else:
         print(f"Already '{DIR_PATH}' DIR path")
     
-    d=default()
     detect=Detect()#상위 n개에 대한 detection
-    tensor_d = d.forward()
     tensor_d = tensor_d.to(device)  
     model.to(device)
     
@@ -222,6 +215,7 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
                                          hop_length=800)
 
             # 레이블 시각화
+
             for label in labels[i]:
                 start, _, end, height, class_id= label
                 start *= 300    # 300 = output 이미지 가로 크기
@@ -233,8 +227,8 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
                                        facecolor = 'white',
                                        fill=True,
                                        alpha=0.5,
-                                       lw=5))
-                
+
+            
             for cl in range(1,n_class):    
                 for cls_boxes in all_boxes[cl][i]:
                     start_x, start_y, end_x, end_y = cls_boxes[:-1]
@@ -251,6 +245,7 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
                                        fill=True,
                                        alpha=0.5,
                                        lw=4))
+
                 
                 
 
@@ -258,11 +253,9 @@ def visualization_step(model, Data_loader, image_size=(300,300), device="cpu"):
             plt.ylabel("Frequency")
             plt.savefig(f"detection_result/origin_pred_{idx}_{i}.png")
             
-def test_step(model, Data_loader, image_size=(300,300), device="cpu", _conf_thresh = 0.4, _nms_thresh = 0.5, _iou_threshold = 0.5):
+def test_step(model, Data_loader, tensor_d, image_size=(300,300), device="cpu", conf_thresh = 0.4, nms_thresh = 0.5, iou_threshold = 0.5):
 
-    d=default()
     detect=Detect()#상위 n개에 대한 detection
-    tensor_d = d.forward()
     tensor_d = tensor_d.to(device)  
     model.to(device)
     
@@ -295,23 +288,24 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu", _conf_thre
             #print(sorted_tensor[:10])
             ''' 
             #For Debug
-            cls = (batch,ddobx,3)
+            #cls = (batch,ddobx,3)
             value, i= torch.max(cls, dim=-1)
             s1 = i == 1
             s2 = i == 2
             bg = i == 0
-            상위 200개에 대한 detection
-            size=(batch, numclass ,200, 5)
+            #상위 200개에 대한 detection
+            #size=(batch, numclass ,200, 5)
             '''
 
             output = detect.forward(loc, cls, tensor_d, num_classes = cls.size(-1),  bkg_label=0, top_k=200, 
-                                    conf_thresh = _conf_thresh, nms_thresh = _nms_thresh)
-            ob=output[0,:,:10]
+                                    conf_thresh = conf_thresh, nms_thresh = nms_thresh)
+            #print(output.size())8,3,200,5
+            #ob=output[0,:,:10,:]
             #print(ob.size())
             #print(ob)
         all_boxes = get_box(output)
 
-        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = _iou_threshold)
+        TPFN,TPFP = get_correct_ration(all_boxes, labels, batch = output.size(0), n_class = output.size(1), iou_threshold = iou_threshold)
         
         TP_list   = [0,0,0] #total, s1, s2
         TP_list_2 = [0,0,0] #검수용
@@ -380,16 +374,21 @@ def test_step(model, Data_loader, image_size=(300,300), device="cpu", _conf_thre
         
         ap +=  get_ap(TP_list[0], FP_list[0], FN_list[0], TPFP_filter)
         N = idx+1
-        
-    total_Recall /= N
-    total_Precison /= N
+    
+    try:
+        total_Recall /= N
+        total_Precison /= N
+    except:
+        if N==0:
+            total_Recall = 0
+            total_Precison = 0
     
     S1_Recall   = float(sum(S1_Recall)/len(S1_Recall)) if len(S1_Recall) != 0 else 0
     S2_Recall   = float(sum(S2_Recall)/len(S2_Recall)) if len(S2_Recall) != 0 else 0
     S1_Precison = float(sum(S1_Precison)/len(S1_Precison)) if len(S1_Precison) != 0 else 0
     S2_Precison = float(sum(S2_Precison)/len(S2_Precison)) if len(S2_Precison) != 0 else 0
     
-    mAP = ap / N
+    mAP = ap / N if N != 0 else 0
     
     print(f"{N}/{len(Data_loader)}")
     return (total_Recall, S1_Recall, S2_Recall,total_Precison, S2_Recall, S2_Precison, mAP)
