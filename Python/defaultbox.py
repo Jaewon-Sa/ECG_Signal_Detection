@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
 
 import torch
 import math
@@ -10,7 +6,7 @@ from itertools import product as product
 
 class default:
     
-    def __init__(self, image_size=300, feature_maps=[19, 10, 5, 3, 2, 1], min_sizes=[]):
+    def __init__(self, image_size=300, feature_maps=[19, 10, 5, 3, 2, 1], aspect_ratios=[[2], [2, 3], [2, 3], [2, 3], [2], [2]]):
         super(default, self).__init__()
         self.image_size = 300
         # number of priors for feature map location (either 4 or 6)
@@ -18,13 +14,19 @@ class default:
         self.min_sizes = [16, 30, 60, 100, 150, 300]  #0.2, 0.34, 0.48, 0.62, 0.76, 0.9?
         self.max_sizes = [30, 60, 100, 150, 300, 300]
         self.steps = [19,10,5,3,2,1] # 이미지 그리드로 나눈 개수
-        self.aspect_ratios = [[2], [2, 3], [2, 3], [2, 3], [2], [2]]
+        self.aspect_ratios = aspect_ratios
         self.clip = True
 
-    def forward(self):
+    def forward(self, model_type="MnetSSD"):
         mean = []
+        
         for k, f in enumerate(self.feature_maps):
-            for i, j in product(range(f), repeat=2):
+            if model_type == "MnetSSD":
+                case = product(range(f), repeat=2)
+            else:
+                case = product(range(6), range(f))
+                
+            for i, j in case:
                 f_k = self.steps[k] # 그리드 개수
                 # default 박스 중점
                 cx = (j + 0.5) / f_k
