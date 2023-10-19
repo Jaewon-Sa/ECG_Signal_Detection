@@ -46,7 +46,3 @@ class Detect:
         flt[(rank < self.top_k).unsqueeze(-1).expand_as(flt)].fill_(0)
         return output
 
-
-
-
-
