@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
 import os
 import time
 import torch
@@ -17,7 +12,6 @@ import math
 from torch.optim.lr_scheduler import _LRScheduler
 import wandb
 
-#
 class CosineAnnealingWarmUpRestarts(_LRScheduler):
     def __init__(self, optimizer, T_0, T_mult=1, eta_max=0.1, T_up=0, gamma=1., last_epoch=-1):
         if T_0 <= 0 or not isinstance(T_0, int):
@@ -74,7 +68,9 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
             param_group['lr'] = lr
 
             
-def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, is_wandb = False, device="cpu"):
+def train_step(model, test_model, 
+               train_Data_loader, valid_Data_loader, 
+               tensor_d, param, is_wandb = False, device="cpu"):
     
     epoch_num =  param["epoch_num"]
     batchsize = param["batch_size"]
@@ -84,6 +80,7 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
     max_lr = param["max_lr"]
     min_lr = param["min_lr"]
     
+    alpha = param["alpha"]
     sr = param["SR"]
     wl = param["WL"]
     nfft = param["n_FFT"]
@@ -91,7 +88,8 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
     multi_channels = param["multi_channels"]
     padding_type = param["padding_type"]
     th = param["th"]
-    
+    wandb_entity = param["wandb_entity"]
+    wandb_name = param["wandb_project_name"]
     max_mAP = 0
     if not os.path.exists(DIR_PATH):
         os.makedirs(DIR_PATH)
@@ -102,22 +100,20 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
     if is_wandb==True:
         wandb.init(
             # set the wandb project where this run will be logged
-            project="Heart_Signal_Detection",
+            project = wandb_name,
+            entity = wandb_entity,
 
             # track hyperparameters and run metadata
             config = param
         )
         
         wandb.define_metric("mAP", summary="max")
-
-    d=default()
-    tensor_d = d.forward()
     
     if optim_type =="SGD":
         optimizer = optim.SGD(model.parameters(), lr = min_lr)
     elif optim_type == "Adam":
         optimizer = optim.Adam(model.parameters(), lr = min_lr)
-        scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=2, eta_max = max_lr,  T_up=3, gamma=0.5)
+    scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=2, eta_max = max_lr,  T_up=3, gamma=0.5)
     
     loss_func = MultiBoxLoss(device=device)
     
@@ -146,7 +142,7 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
                 tensor_d = tensor_d.to(device)
                 loss_l, loss_c = loss_func((cls, loc), labels, tensor_d)
                 
-                loss = loss_l + loss_c
+                loss = alpha*loss_l + loss_c
                 loss.backward()
                 
                 #nn.utils.clip_grad_value_(model.parameters(), clip_value=2.0)
@@ -159,7 +155,7 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
                 print(f'Current Batch {idx} / {total_batch_size} '
                       f'learning rate : {scheduler.get_lr()} | Cls Loss : {loss_l.item():.3f},'
                       f'Loc Loss : {loss_c.item():.3f}, Total Loss : {loss.item():.3f} |'
-                      f'50 iter time {iter_end - iter_start:.4f}: ')
+                      f'100 iter time {iter_end - iter_start:.4f}: ')
               
                 iter_start =time.time()
                 
@@ -182,7 +178,11 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
             torch.cuda.empty_cache()
             
             eval_start = time.time()
-            mRecall, mS1_Recall, mS2_Recall, mPrecison, mS1_Precison, mS2_Precison, mAP = test_step(test_model, valid_Data_loader, device = device)
+            mRecall, mS1_Recall, mS2_Recall, mPrecison, mS1_Precison, mS2_Precison, mAP = test_step(test_model, valid_Data_loader, 
+                                                                                                    tensor_d, device = device,
+                                                                                                    conf_thresh = param["conf_thresh"], 
+                                                                                                    nms_thresh = param["nms_thresh"],
+                                                                                                    iou_threshold = param["iou_thresh"])
 
             eval_end = time.time()
             print((f'Epoch : {epoch+1} / {epoch_num} | Total Loss : {epoch_train_loss:.3f}' 
@@ -214,8 +214,6 @@ def train_step(model, test_model, train_Data_loader, valid_Data_loader, param, i
     if is_wandb==True:
         wandb.finish()
 
-
-# In[ ]:
 
 
 
