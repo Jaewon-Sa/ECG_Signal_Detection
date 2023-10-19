@@ -20,6 +20,7 @@ but it is currently showing underfitting.
 
 ## Training & test
 The code for the Training and testing can be found in python/example.ipynb.
+- When we created our custom dataset, we started with data label 1.
 
 ## Performance
 We set the train,valid,test set in the ratio 0.6,0.2,0.2 and the model performance was plucked based on the test set. 
