@@ -7,7 +7,7 @@ All of it can be found [here](https://physionet.org/content/circor-heart-sound/1
 
 ## using model
 We used two types: a mobilenetv3+SSD structure and a custom-made VIT structure using Transformer's Encoder. 
-
+- used python version 3.9.7
 - Mnet+SSD
 ![image](https://github.com/Jaewon-Sa/Heart_Signal_Detection/assets/92181151/7f55eae7-c30a-479f-b327-ed69a4121e04)
 
